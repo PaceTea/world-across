@@ -1,4 +1,5 @@
 #include "albw_launcher.h"
+#include "albw_builder.h"
 #include "albw_platform.h"
 
 #include <math.h>
@@ -554,6 +555,43 @@ static void card_ask(void) {
     SDL_ShowOpenFileDialog(card_picked, NULL, window, filters, 2, NULL, false);
 }
 
+// The game, where the launcher builds it (world-across): whether Play plays, how to build it, and
+// how that is going. Unset in a build with the translation in it.
+static int (*game_ready)(void);
+static int (*game_build)(void);
+static void (*game_progress)(struct albw_build_progress *out);
+static int play_when_ready;                              // Play was asked for while it was built
+
+void albw_launcher_set_builder(int (*ready)(void), int (*build)(void),
+                               void (*progress)(struct albw_build_progress *out)) {
+    game_ready = ready;
+    game_build = build;
+    game_progress = progress;
+}
+
+static int game_building(struct albw_build_progress *p) {
+    if (!game_progress) return 0;
+    game_progress(p);
+    return p->state == ALBW_BUILD_RUNNING;
+}
+
+// Play, with the game not built yet: building it, and playing once it is.
+static void game_start_build(void) {
+    struct albw_build_progress p;
+    if (!game_building(&p) && game_build) game_build();
+    play_when_ready = 1;
+}
+
+enum albw_launcher_action albw_launcher_poll(void) {
+    if (play_when_ready && game_ready && game_ready()) {
+        play_when_ready = 0;
+        want_visible = 0;
+        started = 1;
+        return ALBW_LAUNCHER_PLAY;
+    }
+    return ALBW_LAUNCHER_NONE;
+}
+
 // A path the dialog picked, checked; called each frame the launcher is drawn.
 static void card_take(void) {
     if (!card_mutex) return;
@@ -570,6 +608,8 @@ static void card_take(void) {
     if (card_chooser(path, product, why, sizeof why)) {
         snprintf(card_product, sizeof card_product, "%s", product);
         card_why[0] = '\0';
+        // The launcher's build: a card chosen is a game to make, and then to play.
+        if (game_ready && !game_ready()) game_start_build();
     } else {
         snprintf(card_why, sizeof card_why, "%s", why);
     }
@@ -688,6 +728,11 @@ static enum albw_launcher_action confirm(void) {
             // With no card yet, Play asks for one first.
             if (!card_product[0] && card_chooser && !started) {
                 card_ask();
+                return ALBW_LAUNCHER_NONE;
+            }
+            // With the game not made yet, Play makes it, and plays when it is there.
+            if (game_ready && !game_ready() && !started) {
+                game_start_build();
                 return ALBW_LAUNCHER_NONE;
             }
             want_visible = 0;
@@ -820,6 +865,11 @@ static float approach(float v, float target, float rate, float dt) {
 
 void albw_launcher_draw(SDL_Texture *top) {
     card_take();
+    // The game being made, where the launcher makes it: shown in place of the card's line.
+    struct albw_build_progress build;
+    memset(&build, 0, sizeof build);
+    int building = game_building(&build);
+    int build_shown = game_ready && !game_ready() && (building || build.state == ALBW_BUILD_FAILED);
     uint64_t now = SDL_GetTicksNS();
     float dt = (float)(now - last_ns) * 1e-9f, t = (float)now * 1e-9f;
     if (dt > 0.1f) dt = 0.1f;
@@ -899,6 +949,7 @@ void albw_launcher_draw(SDL_Texture *top) {
             *g = approach(*g, i == sel_main ? 1.0f : 0.0f, 14.0f, dt);
             const char *label = (i == ITEM_PLAY && started) ? "RESUME"
                               : (i == ITEM_PLAY && !card_product[0] && card_chooser) ? "CHOOSE CARD"
+                              : (i == ITEM_PLAY && building) ? "PREPARING..."
                               : labels[i];
             int dim = i == ITEM_MODS;
             float x = x0 + *g * W * 0.012f;
@@ -986,7 +1037,60 @@ void albw_launcher_draw(SDL_Texture *top) {
 
     // The card, and what to press.
     float yb = H * 0.93f;
-    if (!card_product[0] && card_chooser && page == PAGE_MAIN) {
+    if (build_shown && page == PAGE_MAIN) {
+        // The game being made from the card, the first time: which step, how far, and that it is
+        // the only time. Or, where it failed, why, and where the log is.
+        float bar_y = yb - H * 0.004f, bar_w = W * 0.42f, bar_h = H * 0.007f;
+        if (build.state == ALBW_BUILD_FAILED) {
+            text(&f_small, x0, yb - H * 0.096f, "THE GAME COULD NOT BE MADE", gold, 0.95f * fade);
+            // The reason, in lines that fit.
+            char line[720];                     // "Log: " and the log's path
+            const char *p = build.error;
+            float y = yb - H * 0.064f;
+            for (int row = 0; row < 3 && *p; row++) {
+                size_t take = strlen(p);
+                if (take > 96) {
+                    take = 96;
+                    while (take > 40 && p[take] != ' ') take--;
+                }
+                snprintf(line, sizeof line, "%.*s", (int)take, p);
+                text(&f_small, x0, y, line, grey, 0.8f * fade);
+                p += take;
+                while (*p == ' ') p++;
+                y += H * 0.028f;
+            }
+            snprintf(line, sizeof line, "Log: %s", build.log);
+            text(&f_small, x0, yb + H * 0.024f, line, grey, 0.55f * fade);
+        } else {
+            char line[220];
+            text(&f_small, x0, yb - H * 0.064f, "PREPARING THE GAME -- ONLY THIS ONCE", gold, 0.95f * fade);
+            snprintf(line, sizeof line, "Step %d of %d: %s", build.stage ? build.stage : 1,
+                     build.stages ? build.stages : 5, build.what[0] ? build.what : "Starting");
+            text(&f_small, x0, yb - H * 0.032f, line, white, 0.9f * fade);
+            SDL_SetRenderDrawColorFloat(renderer, 1.0f, 1.0f, 1.0f, 0.12f * fade);
+            SDL_FRect track = { x0, bar_y, bar_w, bar_h };
+            SDL_RenderFillRect(renderer, &track);
+            SDL_SetRenderDrawColorFloat(renderer, 0.96f, 0.77f, 0.36f, 0.9f * fade);
+            float done = (build.stage > 0 ? (float)(build.stage - 1) : 0.0f) / (float)(build.stages ? build.stages : 5);
+            float share = 1.0f / (float)(build.stages ? build.stages : 5);
+            if (build.fraction >= 0.0f) {
+                SDL_FRect fill = { x0, bar_y, bar_w * (done + share * build.fraction), bar_h };
+                SDL_RenderFillRect(renderer, &fill);
+            } else {
+                // A step that cannot say how far it is: what is done, and a light running along
+                // the step's own share.
+                SDL_FRect fill = { x0, bar_y, bar_w * done, bar_h };
+                SDL_RenderFillRect(renderer, &fill);
+                float run = 0.5f + 0.5f * sinf(t * 2.4f);
+                SDL_FRect light = { x0 + bar_w * (done + share * 0.8f * run), bar_y, bar_w * share * 0.2f, bar_h };
+                SDL_RenderFillRect(renderer, &light);
+            }
+            text(&f_small, x0, yb + H * 0.032f,
+                 "Your cartridge's code is translated for this computer. It takes a few minutes.",
+                 grey, 0.6f * fade);
+        }
+    }
+    if (!card_product[0] && card_chooser && page == PAGE_MAIN && !build_shown) {
         // No card yet: what Play will do, or why the last one picked was not taken.
         text(&f_small, x0, yb - H * 0.032f, card_why[0] ? "That file is not a card this build plays."
                                                           : "No card image yet.",
@@ -995,7 +1099,7 @@ void albw_launcher_draw(SDL_Texture *top) {
                                            : "Choose a decrypted dump of your own cartridge; it is remembered.",
              grey, 0.7f * fade);
     }
-    if (card_product[0] && page == PAGE_MAIN) {
+    if (card_product[0] && page == PAGE_MAIN && !build_shown) {
         char line[96];
         char region = card_product[9];
         const char *where = region == 'E' ? "USA" : region == 'P' ? "Europe"

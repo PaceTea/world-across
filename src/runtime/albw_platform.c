@@ -8,6 +8,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -127,6 +128,65 @@ void albw_exe_dir(char *out, size_t n) {
 }
 
 int albw_setenv(const char *name, const char *value) { return setenv(name, value, 1); }
+
+void albw_cache_root(char *out, size_t n) {
+    const char *xdg = getenv("XDG_CACHE_HOME"), *home = getenv("HOME");
+    if (xdg && *xdg) snprintf(out, n, "%s/albw-port", xdg);
+    else snprintf(out, n, "%s/.cache/albw-port", home ? home : ".");
+}
+
+#include <dlfcn.h>
+void *albw_library_open(const char *path, char *why, size_t n) {
+    void *lib = dlopen(path, RTLD_NOW | RTLD_LOCAL);
+    if (!lib && why) snprintf(why, n, "%s", dlerror());
+    return lib;
+}
+
+void *albw_library_symbol(void *library, const char *name) { return dlsym(library, name); }
+
+#include <sys/wait.h>
+int albw_run(const char *const *argv, const char *cwd, const char *log) {
+    pid_t pid = fork();
+    if (pid < 0) return -1;
+    if (pid == 0) {
+        // Only what is safe between fork and exec.
+        if (cwd && chdir(cwd) != 0) _exit(126);
+        int out = open(log, O_WRONLY | O_CREAT | O_APPEND, 0644);
+        int nul = open("/dev/null", O_RDONLY);
+        if (nul >= 0) dup2(nul, 0);
+        if (out >= 0) {
+            dup2(out, 1);
+            dup2(out, 2);
+        }
+        execvp(argv[0], (char *const *)argv);
+        _exit(127);
+    }
+    int status;
+    while (waitpid(pid, &status, 0) < 0) {
+        if (errno != EINTR) return -1;
+    }
+    if (!WIFEXITED(status)) return -1;
+    return WEXITSTATUS(status) == 127 ? -1 : WEXITSTATUS(status);
+}
+
+uint64_t albw_memory_available(void) {
+    // What the kernel reckons can be had without swapping: free memory and the caches it would
+    // give up.
+    FILE *f = fopen("/proc/meminfo", "r");
+    if (f) {
+        char line[128];
+        unsigned long long kb;
+        while (fgets(line, sizeof line, f)) {
+            if (sscanf(line, "MemAvailable: %llu kB", &kb) == 1) {
+                fclose(f);
+                return (uint64_t)kb * 1024;
+            }
+        }
+        fclose(f);
+    }
+    long pages = sysconf(_SC_AVPHYS_PAGES), size = sysconf(_SC_PAGESIZE);
+    return pages > 0 && size > 0 ? (uint64_t)pages * (uint64_t)size : 0;
+}
 
 #else
 // ---------------------------------------------------------------------------------------------
@@ -293,4 +353,93 @@ void albw_exe_dir(char *out, size_t n) {
 }
 
 int albw_setenv(const char *name, const char *value) { return _putenv_s(name, value) == 0 ? 0 : -1; }
+
+void albw_cache_root(char *out, size_t n) {
+    const char *d = getenv("LOCALAPPDATA");
+    snprintf(out, n, "%s/albw-port", d && *d ? d : app_data());
+}
+
+void *albw_library_open(const char *path, char *why, size_t n) {
+    HMODULE lib = LoadLibraryA(path);
+    if (!lib && why) snprintf(why, n, "LoadLibrary failed (%lu)", (unsigned long)GetLastError());
+    return (void *)lib;
+}
+
+void *albw_library_symbol(void *library, const char *name) {
+    return (void *)GetProcAddress((HMODULE)library, name);
+}
+
+// One argument as Windows' C runtimes take a command line apart again: in quotes when it has a
+// space, a tab or a quote, with backslashes doubled where they come before a quote.
+static void quote_arg(char *out, size_t n, size_t *at, const char *arg) {
+#define PUT(ch) do { if (*at + 1 < n) out[(*at)++] = (ch); } while (0)
+    int plain = *arg != 0 && !strpbrk(arg, " \t\"");
+    if (plain) {
+        for (const char *p = arg; *p; p++) PUT(*p);
+        return;
+    }
+    PUT('"');
+    for (const char *p = arg;; p++) {
+        size_t slashes = 0;
+        while (*p == '\\') {
+            slashes++;
+            p++;
+        }
+        if (!*p) {
+            for (size_t i = 0; i < slashes * 2; i++) PUT('\\');
+            break;
+        }
+        if (*p == '"') {
+            for (size_t i = 0; i < slashes * 2 + 1; i++) PUT('\\');
+        } else {
+            for (size_t i = 0; i < slashes; i++) PUT('\\');
+        }
+        PUT(*p);
+    }
+    PUT('"');
+#undef PUT
+}
+
+int albw_run(const char *const *argv, const char *cwd, const char *log) {
+    // One command line per call: the builder runs several at once.
+    enum { LINE = 32768 };
+    char *line = malloc(LINE);
+    if (!line) return -1;
+    size_t at = 0;
+    for (int i = 0; argv[i]; i++) {
+        if (i && at + 1 < LINE) line[at++] = ' ';
+        quote_arg(line, LINE, &at, argv[i]);
+    }
+    line[at] = '\0';
+    SECURITY_ATTRIBUTES sa = { sizeof sa, NULL, TRUE };
+    HANDLE out = CreateFileA(log, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE, &sa, OPEN_ALWAYS,
+                             FILE_ATTRIBUTE_NORMAL, NULL);
+    HANDLE nul = CreateFileA("NUL", GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, &sa, OPEN_EXISTING,
+                             FILE_ATTRIBUTE_NORMAL, NULL);
+    STARTUPINFOA si;
+    memset(&si, 0, sizeof si);
+    si.cb = sizeof si;
+    si.dwFlags = STARTF_USESTDHANDLES;
+    si.hStdInput = nul;
+    si.hStdOutput = out;
+    si.hStdError = out;
+    PROCESS_INFORMATION pi;
+    BOOL ok = CreateProcessA(NULL, line, NULL, NULL, TRUE, CREATE_NO_WINDOW, NULL, cwd, &si, &pi);
+    free(line);
+    if (out != INVALID_HANDLE_VALUE) CloseHandle(out);
+    if (nul != INVALID_HANDLE_VALUE) CloseHandle(nul);
+    if (!ok) return -1;
+    WaitForSingleObject(pi.hProcess, INFINITE);
+    DWORD code = 1;
+    GetExitCodeProcess(pi.hProcess, &code);
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+    return (int)code;
+}
+
+uint64_t albw_memory_available(void) {
+    MEMORYSTATUSEX m;
+    m.dwLength = sizeof m;
+    return GlobalMemoryStatusEx(&m) ? (uint64_t)m.ullAvailPhys : 0;
+}
 #endif

@@ -78,6 +78,13 @@ int albw_launcher_init(SDL_Window *window, SDL_Renderer *renderer);
 // The card the game is running from, for the line that says it is ready: its product code.
 void albw_launcher_set_card(const char *product);
 
+// The launcher's build (world-across): `ready` says whether the game is there to play, `build`
+// starts making it from the card, `progress` says how that goes. With them set, Play makes the game
+// first when it is not there, showing how far it is, and plays it once it is.
+struct albw_build_progress;
+void albw_launcher_set_builder(int (*ready)(void), int (*build)(void),
+                               void (*progress)(struct albw_build_progress *out));
+
 // With no card known, Play asks for one in a file dialog and hands the path to `chooser`, which
 // checks it, remembers it and gives the game its RomFS: it returns 1 and the product code, or 0
 // and why not. Set by main() before the window opens.
@@ -90,6 +97,10 @@ enum albw_launcher_action {
     ALBW_LAUNCHER_QUIT,
     ALBW_LAUNCHER_APPLY,      // a setting changed: apply albw_settings()
 };
+
+// Called each frame while the launcher is up: ALBW_LAUNCHER_PLAY once a game that Play asked for
+// has been made.
+enum albw_launcher_action albw_launcher_poll(void);
 
 int albw_launcher_visible(void);
 void albw_launcher_show(int settings_page);

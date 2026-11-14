@@ -3,17 +3,30 @@
 #define _GNU_SOURCE
 
 #include "albw_cpu.h"
-#include "albw_generated.h"
 #include "albw_raster.h"
 #ifdef ALBW_HAVE_WINDOW
 #include "albw_window.h"
 #include "albw_launcher.h"
 #endif
+#ifdef ALBW_GAME_MODULE
+// The launcher's build (world-across): the translated game is a module, loaded at startup or once
+// the launcher has built it from the player's card (albw_game.h), and the dispatch table is its.
+#include "albw_builder.h"
+#include "albw_game.h"
+static uint32_t module_count;
+static const uint32_t *module_addrs;
+static const albw_fn *module_ptrs;
+#define ALBW_FN_COUNT ((size_t)module_count)
+#define albw_fn_addrs module_addrs
+#define albw_fn_ptrs module_ptrs
+#else
+#include "albw_generated.h"
 // The dispatch table's length lives in its own header, so that adding a function changes only the
 // dispatcher and the table and not the header every generated file includes. Guarded so that output
 // from the generator before that change still builds.
 #if !defined(ALBW_FN_COUNT) && __has_include("albw_fn_count.h")
 #include "albw_fn_count.h"
+#endif
 #endif
 #include "albw_dsp.h"
 #include "albw_kernel.h"
@@ -485,11 +498,27 @@ static int looks_like_card(const char *path) {
     return stat(path, &st) == 0 && st.st_size >= 16L * 1024 * 1024;
 }
 
-// Which code the build is a translation of, and which release (src/generated/albw_code_id.c).
-// Weak, so that a translation made before the recompiler wrote them still links, unchecked.
+// Which code the build is a translation of, and which release (src/generated/albw_code_id.c, or the
+// module's). Weak in a build with the translation linked in, so that one made before the recompiler
+// wrote them still links, unchecked.
+#ifdef ALBW_GAME_MODULE
+static const char *build_product_v = "";
+static uint64_t build_hash_v;
+static uint32_t build_size_v;
+static int build_known_v;
+#define BUILD_KNOWN build_known_v
+#define BUILD_PRODUCT build_product_v
+#define BUILD_HASH build_hash_v
+#define BUILD_SIZE build_size_v
+#else
 extern const char albw_build_product[] __attribute__((weak));
 extern const uint64_t albw_build_code_hash __attribute__((weak));
 extern const uint32_t albw_build_code_size __attribute__((weak));
+#define BUILD_KNOWN (&albw_build_code_hash != NULL)
+#define BUILD_PRODUCT (albw_build_product ? albw_build_product : "")
+#define BUILD_HASH albw_build_code_hash
+#define BUILD_SIZE albw_build_code_size
+#endif
 
 static void refuse(const char *title, const char *text) {
     fprintf(stderr, "[init] %s\n", text);
@@ -537,6 +566,131 @@ static const char *default_code(void) {
     return "rom-extract/code.bin";
 }
 
+// The card's code into guest memory, checked against what the translation was made from. A build
+// with its translation in it refuses to go on with another code; the launcher's build makes the game
+// again instead, so there it only says. Returns the size, or below 0.
+static long load_code(const char *path, const char *card, int refusing) {
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        perror(path);
+        return -1;
+    }
+    fseek(f, 0, SEEK_END);
+    long size = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    // The code, its constants and its data, one after another from the text base.
+    if (size <= 0 || (uint64_t)size > ALBW_MEM_SIZE - ALBW_TEXT_BASE
+            || fread(albw_mem + ALBW_TEXT_BASE, 1, (size_t)size, f) != (size_t)size) {
+        fprintf(stderr, "short read of %s\n", path);
+        fclose(f);
+        return -1;
+    }
+    fclose(f);
+    printf("[init] loaded %ld bytes at 0x%08x, %d translated functions\n",
+           size, ALBW_TEXT_BASE, (int)ALBW_FN_COUNT);
+
+    // The translation is of one code.bin, and of one release. Run against another, it would go
+    // wrong somewhere unpredictable instead of saying so here.
+    char mismatch[1400];
+    if (BUILD_KNOWN && ((uint32_t)size != BUILD_SIZE
+                        || fnv1a(albw_mem + ALBW_TEXT_BASE, (size_t)size) != BUILD_HASH)) {
+        if (!refusing) return -2;
+        snprintf(mismatch, sizeof mismatch,
+                 "%s is not the code this build was translated from. After extracting another "
+                 "card, translate it again: tools/find_functions.py, then tools/recompile.py "
+                 "--all --split 16, then ninja -C build.", path);
+        refuse("World Across: the build does not match its code", mismatch);
+    }
+    if (card && BUILD_PRODUCT[0]) {
+        char prod[17];
+        card_product(card, prod);
+        if (prod[0] && strcmp(prod, BUILD_PRODUCT)) {
+            if (!refusing) return -2;
+            snprintf(mismatch, sizeof mismatch,
+                     "This build is a translation of %s, and the card image %s is %s. To play "
+                     "that card, extract and translate it as the README describes under Building.",
+                     BUILD_PRODUCT, card, prod);
+            refuse("World Across: another release", mismatch);
+        }
+    }
+    return size;
+}
+
+#ifdef ALBW_GAME_MODULE
+// The game module: loaded from where the launcher builds it, when it is there and is the card's.
+static void *module_lib;
+static volatile int module_ready;
+static char game_card[1024];
+
+static int module_load(const char *path) {
+    char why[300] = "";
+    module_lib = albw_library_open(path, why, sizeof why);
+    if (!module_lib) {
+        printf("[game ] %s does not load: %s\n", path, why);
+        return 0;
+    }
+    albw_game_connect_fn connect = (albw_game_connect_fn)albw_library_symbol(module_lib, ALBW_GAME_CONNECT);
+    static struct albw_game_host host;
+    host = (struct albw_game_host){ ALBW_GAME_ABI, albw_mem, albw_svc, albw_dispatch, albw_preempt,
+                                    albw_missing_function, albw_unimplemented };
+    const struct albw_game *g = connect ? connect(&host) : NULL;
+    if (!g) {
+        printf("[game ] %s is not a game module of this version\n", path);
+        return 0;
+    }
+    module_count = g->count;
+    module_addrs = g->addrs;
+    module_ptrs = g->ptrs;
+    build_product_v = g->product;
+    build_hash_v = g->code_hash;
+    build_size_v = g->code_size;
+    build_known_v = 1;
+    printf("[game ] %s: %u functions, a translation of %s\n", path, g->count, g->product);
+    return 1;
+}
+
+// The module and its code, when they are there and are of the card. Returns 1 if the game can start.
+static int game_try(const char *card) {
+    if (module_ready) return 1;
+    struct stat st;
+    if (stat(albw_build_module_path(), &st) != 0) return 0;
+    if (!module_lib && !albw_build_current()) {
+        printf("[game ] the game was made by another version of World Across; it is made again\n");
+        return 0;
+    }
+    if (!module_lib && !module_load(albw_build_module_path())) return 0;
+    if (load_code(albw_build_code_path(), card, 0) < 0) {
+        printf("[game ] the game was built from another card; it is built again\n");
+        return 0;
+    }
+    module_ready = 1;
+    return 1;
+}
+
+// The launcher's side: whether Play plays, and the build that makes it so.
+static void game_built(int ok) {
+    if (!ok) return;
+    // A module loaded before -- of another card -- stays loaded, as libraries do; the new one is
+    // a new file under the same name, so it is loaded by a name of its own as well.
+    if (module_lib) {
+        printf("[game ] a game was loaded already; start the program again to play the new one\n");
+        return;
+    }
+    game_try(game_card[0] ? game_card : NULL);
+}
+
+static int game_ready(void) { return module_ready; }
+
+static int game_build(void) {
+    if (!game_card[0]) return 0;
+    return albw_build_start(game_card, game_built);
+}
+
+static void game_card_chosen(const char *card) {
+    snprintf(game_card, sizeof game_card, "%s", card);
+}
+#endif
+
 #ifdef ALBW_HAVE_WINDOW
 // The launcher's file dialog picked a card (albw_launcher_set_card_chooser): checked as one named
 // on the command line is, remembered, and given to the kernel for the game to read when it starts.
@@ -552,20 +706,35 @@ static int choose_card(const char *path, char product[17], char *why, size_t n) 
         snprintf(why, n, "The file has no 3DS card header (a .3ds or .cci dump is what is needed).");
         return 0;
     }
-    if (&albw_build_product && albw_build_product[0] && strcmp(prod, albw_build_product)) {
-        snprintf(why, n, "That card is %s; this build is a translation of %s.", prod, albw_build_product);
+#ifndef ALBW_GAME_MODULE
+    // A build with its translation in it plays that release only; the launcher's build makes the
+    // game from whichever card it is given.
+    if (BUILD_PRODUCT[0] && strcmp(prod, BUILD_PRODUCT)) {
+        snprintf(why, n, "That card is %s; this build is a translation of %s.", prod, BUILD_PRODUCT);
         return 0;
     }
+#endif
     snprintf(chosen, sizeof chosen, "%s", path);
     remember_card(chosen);
     albw_kernel_set_rom(chosen);
     memcpy(product, prod, 17);
+#ifdef ALBW_GAME_MODULE
+    game_card_chosen(chosen);
+#endif
     return 1;
 }
 #endif
 
 int main(int argc, char **argv) {
     albw_platform_init();
+#ifdef ALBW_GAME_MODULE
+    // world-across --build-game [card.3ds]: the game built without a window, as the launcher would.
+    int build_only = argc > 1 && !strcmp(argv[1], "--build-game");
+    if (build_only) {
+        argv++;
+        argc--;
+    }
+#endif
     // albw-boot [card.3ds], albw-boot code.bin [card.3ds], or ALBW_ROM for the card.
     const char *path = NULL, *card = getenv("ALBW_ROM");
     int card_named = 0;
@@ -598,44 +767,21 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    FILE *f = fopen(path, "rb");
-    if (!f) {
-        perror(path);
-        return 1;
-    }
-    fseek(f, 0, SEEK_END);
-    long size = ftell(f);
-    fseek(f, 0, SEEK_SET);
-    if (fread(albw_mem + ALBW_TEXT_BASE, 1, (size_t)size, f) != (size_t)size) {
-        fprintf(stderr, "short read of %s\n", path);
-        return 1;
-    }
-    fclose(f);
-    printf("[init] loaded %ld bytes at 0x%08x, %d translated functions\n",
-           size, ALBW_TEXT_BASE, ALBW_FN_COUNT);
-
-    // The translation is of one code.bin, and of one release. Run against another, it would go
-    // wrong somewhere unpredictable instead of saying so here.
-    char mismatch[1400];
-    if (&albw_build_code_hash && ((uint32_t)size != albw_build_code_size ||
-            fnv1a(albw_mem + ALBW_TEXT_BASE, (size_t)size) != albw_build_code_hash)) {
-        snprintf(mismatch, sizeof mismatch,
-                 "%s is not the code this build was translated from. After extracting another "
-                 "card, translate it again: tools/find_functions.py, then tools/recompile.py "
-                 "--all --split 16, then ninja -C build.", path);
-        refuse("World Across: the build does not match its code", mismatch);
-    }
-    if (card && albw_build_product && albw_build_product[0]) {
-        char prod[17];
-        card_product(card, prod);
-        if (prod[0] && strcmp(prod, albw_build_product)) {
-            snprintf(mismatch, sizeof mismatch,
-                     "This build is a translation of %s, and the card image %s is %s. To play "
-                     "that card, extract and translate it as the README describes under Building.",
-                     albw_build_product, card, prod);
-            refuse("World Across: another release", mismatch);
+#ifdef ALBW_GAME_MODULE
+    (void)path;
+    if (card) game_card_chosen(card);
+    if (build_only) {
+        if (!card) {
+            fprintf(stderr, "[build] which card? world-across --build-game /path/to/your.3ds\n");
+            return 2;
         }
+        return albw_build_run(card) ? 0 : 1;
     }
+    // The game, if the launcher has built it from this card before.
+    game_try(card);
+#else
+    if (load_code(path, card, 1) < 0) return 1;
+#endif
 
     const char *dp = getenv("ALBW_DISCOVER");
     if (dp) {
@@ -677,6 +823,9 @@ int main(int argc, char **argv) {
         albw_launcher_set_card(prod);
     }
     albw_launcher_set_card_chooser(choose_card);
+#ifdef ALBW_GAME_MODULE
+    albw_launcher_set_builder(game_ready, game_build, albw_build_progress);
+#endif
     if (albw_window_open()) {
         if (!albw_window_launch()) {
             albw_window_close();
@@ -691,6 +840,13 @@ int main(int argc, char **argv) {
     wav_start(NULL);
 #endif
 
+#ifdef ALBW_GAME_MODULE
+    if (!module_ready) {
+        fprintf(stderr, "[game ] the game has not been built yet: start World Across with a window "
+                        "and choose your card, or run  world-across --build-game /path/to/your.3ds\n");
+        return 1;
+    }
+#endif
     // The entry point runs as a scheduled thread like any other, so it can block and let
     // the threads it creates run. With a window, all of that goes on a thread of its own, and
     // this one is the window's.

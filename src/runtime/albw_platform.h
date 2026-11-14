@@ -62,6 +62,21 @@ void albw_exe_dir(char *out, size_t n);
 
 int albw_setenv(const char *name, const char *value);
 
+// Where what can be made again is kept -- the game module built for this machine:
+// ~/.cache/albw-port, or %LOCALAPPDATA%\albw-port.
+void albw_cache_root(char *out, size_t n);
+
+// A shared library opened (NULL, and `why` says why, if it cannot be), and one of its symbols.
+void *albw_library_open(const char *path, char *why, size_t n);
+void *albw_library_symbol(void *library, const char *name);
+
+// Runs a program to its end and returns its exit status, or -1 if it could not be started: argv[0]
+// is looked for on the PATH when it names no directory, it runs in `cwd`, and its output goes onto
+// the end of `log`. No console window opens for it on Windows.
+int albw_run(const char *const *argv, const char *cwd, const char *log);
+
+uint64_t albw_memory_available(void);                  // memory free for use now, in bytes
+
 // Memory aligned to `align` bytes (a power of two), and its release: Windows' C library has no
 // aligned_alloc, since its free() could not release such a block.
 #ifdef _WIN32

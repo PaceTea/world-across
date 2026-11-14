@@ -14,7 +14,7 @@ file(GLOB ALBW_GENERATED CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/src/generated/*.c
 # a build for a newer x86 level.
 set_source_files_properties(${ALBW_GENERATED} PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
 
-add_executable(albw-boot
+set(ALBW_RUNTIME_SOURCES
     src/runtime/albw_runtime.c
     src/runtime/albw_kernel.c
     src/runtime/albw_romfs.c
@@ -28,27 +28,48 @@ add_executable(albw-boot
     src/runtime/albw_shader.c
     src/runtime/albw_thread.c
     src/runtime/albw_platform.c
-    ${ALBW_GENERATED}
 )
-target_include_directories(albw-boot PRIVATE src/runtime src/generated)
-target_compile_options(albw-boot PRIVATE -O1 -g -fno-strict-aliasing -Wall
+
+# Two programs play the game. albw-boot has the translation linked in: it is what the tools and the
+# regression checks run, and it needs a translated card to build. world-across is the launcher
+# that is published: it has none of the game, makes it on the player's machine from their own
+# card the first time it starts (albw_builder.c), and loads it as a module (albw_game.h). It builds
+# without a card. Everything else -- window, renderers, upscalers, Windows resources -- they share
+# through albw_player.
+add_library(albw_player INTERFACE)
+add_executable(albw-boot ${ALBW_RUNTIME_SOURCES} ${ALBW_GENERATED})
+add_executable(world-across ${ALBW_RUNTIME_SOURCES} src/runtime/albw_builder.c)
+target_compile_definitions(world-across PRIVATE ALBW_GAME_MODULE)
+target_link_libraries(world-across PRIVATE ${CMAKE_DL_LIBS})
+# Further sources for the launcher alone: the AppImage's stand-ins for what older C libraries lack
+# (tools/make_appimage.sh).
+set(ALBW_LAUNCHER_EXTRA_SOURCES "" CACHE STRING "Further sources linked into world-across")
+target_sources(world-across PRIVATE ${ALBW_LAUNCHER_EXTRA_SOURCES})
+if(WIN32)
+    set_target_properties(world-across PROPERTIES OUTPUT_NAME WorldAcross)
+endif()
+foreach(player albw-boot world-across)
+    target_link_libraries(${player} PRIVATE albw_player)
+endforeach()
+target_include_directories(albw_player INTERFACE src/runtime src/generated)
+target_compile_options(albw_player INTERFACE -O1 -g -fno-strict-aliasing -Wall
     -Wno-unused-but-set-variable -Wno-unused-variable)
-target_link_libraries(albw-boot PRIVATE m)
+target_link_libraries(albw_player INTERFACE m)
 
 # Windows (MinGW-w64, natively in MSYS2 or across from Linux with cmake/mingw-w64-x86_64.cmake):
 # Windows 10's API (WaitOnAddress), C99's printf, the C and C++ runtimes linked in so that the
 # program needs no DLL but SDL's, and a manifest that makes paths UTF-8 as on Linux.
 if(WIN32)
     enable_language(RC)
-    target_compile_definitions(albw-boot PRIVATE _WIN32_WINNT=0x0A00 __USE_MINGW_ANSI_STDIO=1)
-    target_sources(albw-boot PRIVATE src/windows/albw-boot.rc)
-    target_link_libraries(albw-boot PRIVATE synchronization)
-    target_link_options(albw-boot PRIVATE -static -static-libgcc -static-libstdc++)
+    target_compile_definitions(albw_player INTERFACE _WIN32_WINNT=0x0A00 __USE_MINGW_ANSI_STDIO=1)
+    target_sources(albw_player INTERFACE src/windows/albw-boot.rc)
+    target_link_libraries(albw_player INTERFACE synchronization)
+    target_link_options(albw_player INTERFACE -static -static-libgcc -static-libstdc++)
     # stb is headers alone: a cross build takes the host's, copied where only they are found.
     if(CMAKE_CROSSCOMPILING AND EXISTS /usr/include/stb/stb_truetype.h)
         file(COPY /usr/include/stb/stb_truetype.h /usr/include/stb/stb_image.h
              DESTINATION ${CMAKE_BINARY_DIR}/host-include/stb)
-        target_include_directories(albw-boot SYSTEM PRIVATE ${CMAKE_BINARY_DIR}/host-include)
+        target_include_directories(albw_player SYSTEM INTERFACE ${CMAKE_BINARY_DIR}/host-include)
     endif()
     # SDL3's MinGW development files, unpacked into external/, unless SDL3_DIR says where.
     # (A failed search leaves SDL3_DIR-NOTFOUND in the cache, which a later unpacking replaces.)
@@ -76,12 +97,12 @@ if(SDL3_FOUND)
     # The temporal upscalers' module is C++, as AMD's and NVIDIA's interfaces are; without either
     # SDK it is only the answer that neither is there.
     enable_language(CXX)
-    target_sources(albw-boot PRIVATE src/runtime/albw_window.c src/runtime/albw_launcher.c
+    target_sources(albw_player INTERFACE src/runtime/albw_window.c src/runtime/albw_launcher.c
                                      src/runtime/albw_upscale.c src/runtime/albw_vkup.cpp)
     set_source_files_properties(src/runtime/albw_upscale.c PROPERTIES COMPILE_OPTIONS "-O2")
     set_source_files_properties(src/runtime/albw_vkup.cpp PROPERTIES COMPILE_OPTIONS "-O2;-std=c++17")
-    target_compile_definitions(albw-boot PRIVATE ALBW_HAVE_WINDOW)
-    target_link_libraries(albw-boot PRIVATE SDL3::SDL3)
+    target_compile_definitions(albw_player INTERFACE ALBW_HAVE_WINDOW)
+    target_link_libraries(albw_player INTERFACE SDL3::SDL3)
 
     # AMD FSR 1 (third_party/fsr1, MIT), as two fragment shaders for SDL's GPU renderer, compiled to
     # SPIR-V here and built into the binary. Without glslc the window simply offers no FSR.
@@ -125,11 +146,11 @@ if(SDL3_FOUND)
                 VERBATIM)
             list(APPEND ALBW_GPU_HEADERS ${ALBW_SHADER_OUT}/${name}.h)
         endforeach()
-        target_sources(albw-boot PRIVATE ${ALBW_SHADER_HEADERS} ${ALBW_GPU_HEADERS}
+        target_sources(albw_player INTERFACE ${ALBW_SHADER_HEADERS} ${ALBW_GPU_HEADERS}
                                          src/runtime/albw_gpu.c)
         set_source_files_properties(src/runtime/albw_gpu.c PROPERTIES COMPILE_OPTIONS "-O2")
-        target_include_directories(albw-boot PRIVATE ${ALBW_SHADER_OUT})
-        target_compile_definitions(albw-boot PRIVATE ALBW_HAVE_FSR ALBW_HAVE_GPU)
+        target_include_directories(albw_player INTERFACE ${ALBW_SHADER_OUT})
+        target_compile_definitions(albw_player INTERFACE ALBW_HAVE_FSR ALBW_HAVE_GPU)
         message(STATUS "glslc found: the window offers AMD FSR 1 and the GPU renderer")
     else()
         message(STATUS "glslc not found: no FSR")
@@ -224,8 +245,8 @@ if(SDL3_FOUND)
             -include ${CMAKE_SOURCE_DIR}/src/ffx/ffx_port_compat.h -O2 -w)
         target_link_libraries(albw_ffx PUBLIC Vulkan::Vulkan)
 
-        target_link_libraries(albw-boot PRIVATE albw_ffx)
-        target_compile_definitions(albw-boot PRIVATE ALBW_HAVE_FSR3)
+        target_link_libraries(albw_player INTERFACE albw_ffx)
+        target_compile_definitions(albw_player INTERFACE ALBW_HAVE_FSR3)
         message(STATUS "FidelityFX SDK found: the window offers AMD FSR 3")
     else()
         message(STATUS "FidelityFX SDK 1.1.4 not in external/ (or no Vulkan, glslc or Python): no FSR 3")
@@ -238,10 +259,10 @@ if(SDL3_FOUND)
         CACHE PATH "NVIDIA's DLSS SDK (include/ and lib/Linux_x86_64/)")
     if(Vulkan_FOUND AND EXISTS "${ALBW_DLSS_SDK}/include/nvsdk_ngx_vk.h"
             AND EXISTS "${ALBW_DLSS_SDK}/lib/Linux_x86_64/libnvsdk_ngx.a")
-        target_include_directories(albw-boot PRIVATE ${ALBW_DLSS_SDK}/include)
-        target_link_libraries(albw-boot PRIVATE ${ALBW_DLSS_SDK}/lib/Linux_x86_64/libnvsdk_ngx.a
+        target_include_directories(albw_player INTERFACE ${ALBW_DLSS_SDK}/include)
+        target_link_libraries(albw_player INTERFACE ${ALBW_DLSS_SDK}/lib/Linux_x86_64/libnvsdk_ngx.a
                                                 ${CMAKE_DL_LIBS} Vulkan::Vulkan)
-        target_compile_definitions(albw-boot PRIVATE ALBW_HAVE_DLSS
+        target_compile_definitions(albw_player INTERFACE ALBW_HAVE_DLSS
             ALBW_DLSS_LIBRARY_DIR="${ALBW_DLSS_SDK}/lib/Linux_x86_64/rel")
         message(STATUS "DLSS SDK found: the window offers NVIDIA DLSS on NVIDIA's RTX cards")
     else()
@@ -250,11 +271,13 @@ if(SDL3_FOUND)
     if(WIN32)
         # A program with a window, not a console's: started from a terminal it still writes there,
         # and otherwise into last-run.log beside its settings (albw_platform_init).
-        target_link_options(albw-boot PRIVATE -mwindows)
-        add_custom_command(TARGET albw-boot POST_BUILD
-            COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:SDL3::SDL3>
-                    $<TARGET_FILE_DIR:albw-boot>
-            COMMENT "SDL3.dll beside albw-boot.exe")
+        target_link_options(albw_player INTERFACE -mwindows)
+        foreach(player albw-boot world-across)
+            add_custom_command(TARGET ${player} POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:SDL3::SDL3>
+                        $<TARGET_FILE_DIR:${player}>
+                COMMENT "SDL3.dll beside ${player}")
+        endforeach()
     endif()
     message(STATUS "SDL3 found: albw-boot opens a window")
 else()
@@ -365,7 +388,7 @@ endif()
 
 # The rasteriser draws with a pool of threads.
 find_package(Threads REQUIRED)
-foreach(target albw-boot albw-boot-trace albw-boot-writes albw-boot-nan albw-kernel)
+foreach(target albw-boot world-across albw-boot-trace albw-boot-writes albw-boot-nan albw-kernel)
     if(TARGET ${target})
         target_link_libraries(${target} PRIVATE Threads::Threads)
     endif()

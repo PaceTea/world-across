@@ -1,8 +1,8 @@
 [Desktop Entry]
 Type=Application
 Name=World Across
-Comment=A Link Between Worlds, recompiled for Linux (your own build)
-Exec=albw-boot
+Comment=A Link Between Worlds, played natively from your own cartridge
+Exec=world-across
 Icon=world-across
 Terminal=false
 Categories=Game;

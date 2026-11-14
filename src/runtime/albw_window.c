@@ -953,6 +953,11 @@ int albw_window_launch(void) {
                 default: break;
             }
         }
+        // A game the launcher was making, made: Play goes ahead as if pressed now.
+        if (albw_launcher_poll() == ALBW_LAUNCHER_PLAY) {
+            next_frame_ns = SDL_GetTicksNS();
+            return 1;
+        }
         SDL_SetRenderLogicalPresentation(renderer, 0, 0, SDL_LOGICAL_PRESENTATION_DISABLED);
         SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
         SDL_RenderClear(renderer);

@@ -1,9 +1,9 @@
 # World Across
 
-A native Linux build of *The Legend of Zelda: A Link Between Worlds* (Nintendo 3DS), made by
-translating the game's ARM11 code into C ahead of time rather than interpreting it at runtime.
-Inside the tree the project still goes by its working name, albw-port: the program is
-`build/albw-boot`, and its settings and saves live in directories of that name.
+A native Linux and Windows build of *The Legend of Zelda: A Link Between Worlds* (Nintendo 3DS),
+made by translating the game's ARM11 code into C ahead of time rather than interpreting it at
+runtime. Inside the tree the project still goes by its working name, albw-port: the developer's
+program is `build/albw-boot`, and settings and saves live in directories of that name.
 There is no emulator underneath: each guest function becomes a C function, and the parts of the
 3DS operating system the game expects are reimplemented as a small kernel in `src/runtime`.
 
@@ -36,6 +36,25 @@ What is missing: cube maps and the other GPU features this game has not been see
 DSP's reverb and compressor, frame generation, and the certainty that the rest of the game runs.
 So this is a port whose first scenes can be played, plus the tooling to keep extending it as the
 game goes on -- not yet one anybody has played through.
+
+## Download
+
+The [releases](https://github.com/PaceTea/world-across/releases) have the launcher for Linux and
+for Windows. It holds no part of the game: the first time it starts, you choose your card -- a
+decrypted dump of a cartridge you own -- and it makes the game from it on your machine, reading
+the card, translating the game's code to C and compiling it. That takes a few minutes, once; the
+tools it needs (the translator, Python and a C compiler) come with it.
+
+- **Linux**: `World-Across-x86_64.AppImage`. Make it executable (`chmod +x`) and start it. It
+  runs on any distribution with glibc 2.34 or later -- Ubuntu 22.04, Debian 12, Fedora 35 and
+  newer -- and needs nothing installed besides a graphics driver.
+- **Windows**: `World-Across-Windows.zip`. Unpack it entirely and start `WorldAcross.exe` from the
+  unpacked folder. Windows 10 or later, 64-bit.
+
+The graphics card draws the game through Vulkan, which every current AMD, NVIDIA and Intel driver
+provides; without it the processor draws instead. What the launcher makes from your card stays
+on your machine -- `~/.cache/albw-port/build` on Linux, `%LOCALAPPDATA%\albw-port\build` on
+Windows -- and is yours alone.
 
 ## What you need to supply
 
@@ -109,38 +128,51 @@ on Debian and Ubuntu) and, for the window, SDL3's MinGW development files: unpac
 `SDL3-devel-<version>-mingw.tar.gz` from SDL's releases into `external/` (or point `SDL3_DIR` at
 its `x86_64-w64-mingw32/lib/cmake/SDL3`). Without them it is built headless. The result is
 `build-win/albw-boot.exe`, with `SDL3.dll` beside it; it needs Windows 10 or later and, for the GPU
-renderer, a Vulkan driver (every current AMD, NVIDIA and Intel driver has one).
-`tools/make_windows_package.sh` puts everything the Windows machine needs into one folder and one
-.zip (`build-win/World-Across-Windows.zip`, some 13 MB): the program without its debugging
-information, `SDL3.dll`, the card's `code.bin`, the licences and a short README. The card image is
-chosen in the launcher. Like the AppImage, the package holds the translated game: it is for your
-own machines only. Settings and saves go to
-`%APPDATA%\albw-port`, and the log of the last run, when it was not started from a console, to
-`%APPDATA%\albw-port\last-run.log`.
+renderer, a Vulkan driver (every current AMD, NVIDIA and Intel driver has one). Settings and saves
+go to `%APPDATA%\albw-port`, and the log of the last run, when it was not started from a console,
+to `%APPDATA%\albw-port\last-run.log`.
 
 The Windows build is checked the way the Linux one is, under Wine: `ALBW_WINE=1
 tools/frames_check.sh check` and `ALBW_WINE=1 tools/routes_check.sh check` play it against the same
 reference, and it has to come out byte for byte the same. FSR 3 and DLSS are not in the Windows
 build yet. Like everything built from your cartridge, it is yours alone.
 
-### An AppImage of your own build
+### The launcher and the packages
+
+Besides `albw-boot`, the build makes `world-across` (`WorldAcross.exe` on Windows): the same
+program without the translation linked in. It finds the game as a module -- `libgame.so`, or
+`game.dll` -- in the cache folder, and where there is none yet, it makes one from the card
+(`src/runtime/albw_builder.c`): it runs the three steps above with the tools of a kit and
+compiles the translation, with the glue in `src/runtime/albw_game_glue.c`, into a module that
+needs no C library (`src/runtime/albw_game.h` is the interface). `world-across --build-game` does
+the same without a window. In a checkout the kit is the checkout itself, with the system's Python
+and compiler.
+
+The published packages are that launcher with a kit of their own:
 
 ```bash
-tools/make_appimage.sh
+tools/make_appimage.sh            # build-appimage/World-Across-x86_64.AppImage
+tools/make_windows_package.sh     # build-win/World-Across-Windows.zip
 ```
 
-packs the build into one file, `build/World_Across-x86_64.AppImage`, with SDL3 inside it (many
-distributions do not have it yet), an icon and a menu entry. It needs `squashfs-tools` and
-AppImage's own runtime, `runtime-x86_64` from
-[AppImage/type2-runtime](https://github.com/AppImage/type2-runtime/releases), at
-`build/appimage/runtime-x86_64` (or named by `APPIMAGE_RUNTIME`); the script downloads nothing.
-The AppImage runs where the build would: on your distribution, and on any with a C library at
-least as new. Started from a menu the first time, the launcher asks for your card image and
-remembers it.
+Each bundles the translating tools, Python with capstone and a C compiler cut down to what the
+translation needs -- GCC 16 from [musl-cross](https://github.com/cross-tools/musl-cross) for
+Linux, from [w64devkit](https://github.com/skeeto/w64devkit) for Windows -- with their licences
+and where their sources are. The scripts download nothing: they take what they bundle from
+`external/kit/` and check each file against the SHA-256 sum they name, together with where it
+comes from. The AppImage builds SDL3 statically and holds the launcher to glibc 2.34
+(`tools/appimage/`); the Windows package needs the Windows build of `world-across` first. Both
+refuse to package anything made from a card.
 
-It holds the translated game and the card's code, so it is yours alone: keep it on your own
-machines and do not share it. There is no AppImage to download for the same reason -- each one can
-only be made from a cartridge its owner has.
+A module the packages' compilers made has to play exactly as `albw-boot` does: `ALBW_BOOT` names
+the program the checks run, so
+
+```bash
+XDG_CACHE_HOME=<its cache> ALBW_BOOT=build-appimage/World-Across-x86_64.AppImage tools/routes_check.sh check
+ALBW_WINE=1 ALBW_BOOT=<unpacked package>/WorldAcross.exe tools/routes_check.sh check
+```
+
+play the AppImage and the Windows package against the same reference.
 
 ## Running
 
@@ -430,8 +462,9 @@ src/shaders/     the GPU renderer's shaders and FSR 1's, compiled to SPIR-V at b
 src/generated/   the translated game (not in git)
 src/ffx/         what AMD's FidelityFX SDK needs to build on Linux
 entries/         guest addresses the running game branched to, per release (see above)
-tools/           extraction, recompiler, oracle, discovery loop, regression checks, Ghidra scripts
-third_party/     AMD FSR 1, unchanged
+tools/           extraction, recompiler, oracle, discovery loop, regression checks, Ghidra scripts,
+                 the packaging scripts (tools/appimage: what the AppImage needs)
+third_party/     AMD FSR 1, unchanged; the licences of what the packages bundle (kit/)
 cmake/           build helpers
 ```
 
@@ -480,6 +513,7 @@ and `src/runtime/albw_upscale.c` follows its EASU and RCAS step by step in C.
 The port's own code is under the MIT licence; see `LICENSE`. Third-party code keeps its own: AMD
 FSR 1 in `third_party/fsr1/` is under the MIT licence as well (`third_party/fsr1/license.txt`), and
 the FidelityFX and DLSS SDKs are not part of the repository and come with their own terms (see
-above). The licence covers this repository and nothing else: the game, its code and its assets are
+above). The packages carry the licences of everything they bundle, and say where its sources are;
+DLSS is not in them. The licence covers this repository and nothing else: the game, its code and its assets are
 Nintendo's, and nothing derived from a cartridge -- extracted files, translated code, a build of
 the port -- may be redistributed.

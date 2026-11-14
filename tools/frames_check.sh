@@ -23,14 +23,16 @@ if [ -z "${ALBW_ROM:-}" ]; then
     exit 2
 fi
 
+# ALBW_BOOT names another program to run -- world-across, say, with the game it built from the
+# card -- in place of build/albw-boot, or of build-win/albw-boot.exe under Wine.
 # ALBW_WINE=1 runs the Windows build (build-win/albw-boot.exe, see the README) under Wine instead,
 # against the same reference: the two have to play the same game. Wine's own WINEPREFIX applies.
 if [ -n "${ALBW_WINE:-}" ]; then
-    boot=(wine "$root/build-win/albw-boot.exe")
+    boot=(wine "${ALBW_BOOT:-$root/build-win/albw-boot.exe}")
     winpath() { printf 'Z:%s' "$(realpath -m "$1")"; }
     export WINEDEBUG=${WINEDEBUG:--all} WINEDLLOVERRIDES=${WINEDLLOVERRIDES:-mscoree,mshtml=}
 else
-    boot=("$root/build/albw-boot")
+    boot=("${ALBW_BOOT:-$root/build/albw-boot}")
     winpath() { printf '%s' "$1"; }
 fi
 
