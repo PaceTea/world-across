@@ -30,8 +30,13 @@ void albw_build_progress(struct albw_build_progress *out);
 // The same, here and now, printing how it goes: for a run with no window. Returns 1 if it worked.
 int albw_build_run(const char *card);
 
-// Whether the game there was made with this kit -- 0 after an update that brought another one, and
-// then it is made again.
+// Whether the game there was made with this kit and has everything the last run met -- 0 after an
+// update that brought another kit, or a run that reached untranslated code, and then it is made
+// again.
 int albw_build_current(void);
+
+// Whether the last run met code the game lacks (missing_entries.txt beside the saves): the next
+// build translates it as well.
+int albw_build_has_missing(void);
 
 #endif

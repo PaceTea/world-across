@@ -8,6 +8,7 @@
 // translation, the objects, the module and build.log, the log of everything that ran.
 #include "albw_builder.h"
 #include "albw_platform.h"
+#include "albw_savedata.h"
 
 #include <errno.h>
 #include <pthread.h>
@@ -247,6 +248,68 @@ static void *compile_worker(void *arg) {
     }
 }
 
+// What play has taught the build. When the game reaches code the module lacks, the runtime notes the
+// address in missing_entries.txt beside the saves; the next build folds it into the release's
+// addresses, and keeps it -- with every one before it -- in learned-<product>.txt there, so that
+// it is never needed twice. (That file can only be made by playing, so it lives with the saves,
+// not in the cache.)
+static void missing_path(char *out, size_t n) { snprintf(out, n, "%s/missing_entries.txt", albw_save_root()); }
+
+static void learned_path(char *out, size_t n, const char *product) {
+    snprintf(out, n, "%s/learned-%s.txt", albw_save_root(), product);
+}
+
+int albw_build_has_missing(void) {
+    char path[700];
+    missing_path(path, sizeof path);
+    struct stat st;
+    return stat(path, &st) == 0 && st.st_size > 0;
+}
+
+// Addresses -- eight hex digits a line -- read into a set kept sorted.
+struct addrs { uint32_t *v; size_t n, cap; };
+
+static int addr_cmp(const void *a, const void *b) {
+    uint32_t x = *(const uint32_t *)a, y = *(const uint32_t *)b;
+    return x < y ? -1 : x > y;
+}
+
+static void addrs_read(struct addrs *a, const char *path) {
+    FILE *f = fopen(path, "r");
+    if (!f) return;
+    char line[64];
+    while (fgets(line, sizeof line, f)) {
+        char *end;
+        unsigned long v = strtoul(line, &end, 16);
+        if (end == line) continue;
+        if (a->n == a->cap) {
+            size_t cap = a->cap ? a->cap * 2 : 1024;
+            uint32_t *grown = realloc(a->v, cap * sizeof *grown);
+            if (!grown) break;
+            a->v = grown;
+            a->cap = cap;
+        }
+        a->v[a->n++] = (uint32_t)v;
+    }
+    fclose(f);
+}
+
+static int addrs_write(struct addrs *a, const char *path) {
+    qsort(a->v, a->n, sizeof *a->v, addr_cmp);
+    char tmp[800];
+    snprintf(tmp, sizeof tmp, "%s.new", path);
+    FILE *f = fopen(tmp, "w");
+    if (!f) return 0;
+    for (size_t i = 0; i < a->n; i++) {
+        if (i && a->v[i] == a->v[i - 1]) continue;
+        fprintf(f, "%08X\n", a->v[i]);
+    }
+    if (fclose(f) != 0) return 0;
+    return albw_rename(tmp, path) == 0;
+}
+
+static char product[32];                                 // the card's, once it has been read
+
 // Which kit a game was made with: a hash of everything the build reads besides the card -- the
 // tools, the addresses, the header and the glue -- and of how it compiles. A launcher of another
 // version brings another kit, and makes the game again rather than play a translation its runtime
@@ -294,6 +357,7 @@ int albw_build_current(void) {
     paths();
     // Without its kit the game cannot be made again, so the one there is is played.
     if (!find_kit()) return 1;
+    if (albw_build_has_missing()) return 0;               // the last run met code it lacks
     char path[800], line[64] = "";
     kit_id_path(path, sizeof path);
     FILE *f = fopen(path, "r");
@@ -362,6 +426,30 @@ static int build(const char *card) {
     if (status != 0 || !exists(code_path)) {
         return fail("The card could not be read. It has to be a decrypted dump of the cartridge "
                     "(.3ds or .cci). The log says more.");
+    }
+    // The release's addresses, with what play has taught: the ones learned before and the ones
+    // the last run met.
+    product[0] = '\0';
+    snprintf(from, sizeof from, "%s/rom-extract/product_code.txt", build_dir);
+    FILE *pf = fopen(from, "r");
+    if (pf) {
+        if (fgets(product, sizeof product, pf)) product[strcspn(product, " \r\n")] = '\0';
+        fclose(pf);
+    }
+    if (product[0] && !strpbrk(product, "/\\.")) {
+        struct addrs known = { 0 };
+        snprintf(to, sizeof to, "%s/entries/%s.txt", build_dir, product);
+        addrs_read(&known, to);
+        size_t from_kit = known.n;
+        learned_path(from, sizeof from, product);
+        addrs_read(&known, from);
+        missing_path(from, sizeof from);
+        addrs_read(&known, from);
+        if (known.n > from_kit) {
+            log_line("%zu addresses play has found, besides the package's %zu", known.n - from_kit, from_kit);
+            if (!addrs_write(&known, to)) return fail("The addresses could not be written.");
+        }
+        free(known.v);
     }
 
     set_stage(2, "Finding the game's functions");
@@ -463,6 +551,17 @@ static int build(const char *card) {
     if (id) {
         fprintf(id, "%016llx\n", (unsigned long long)kit_identity());
         fclose(id);
+    }
+    // What the last run met is part of the game now: kept, and no longer missing.
+    if (product[0] && albw_build_has_missing()) {
+        struct addrs learned = { 0 };
+        char missing[700];
+        learned_path(to, sizeof to, product);
+        missing_path(missing, sizeof missing);
+        addrs_read(&learned, to);
+        addrs_read(&learned, missing);
+        if (addrs_write(&learned, to)) remove(missing);
+        free(learned.v);
     }
     log_line("built %s in %ld seconds", module_path, (long)(time(NULL) - started));
     return 1;

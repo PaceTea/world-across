@@ -342,6 +342,12 @@ tools/catch_up.sh
 
 translates it into the build, and the game can be started again from its last save.
 
+The launcher does this by itself: started again after such a stop, it makes the game anew with the
+address in it -- a few minutes -- and keeps every address play has found, per release, in
+`learned-<product code>.txt` beside the saves, so that none is needed twice. Those files are the
+way to the addresses of releases other than the American one (`entries/` has only
+`CTR-P-BZLE.txt` so far): sent in, they become that release's `entries/` file for everyone.
+
 ## Where saves go
 
 Anything the game writes — its save, and the play coin file it expects the console to have —

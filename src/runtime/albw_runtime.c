@@ -187,20 +187,37 @@ static void note_for_catch_up(uint32_t target) {
     discover_fp = fopen(path, "a");
     if (!discover_fp) return;
     record_missing(target);
+#ifdef ALBW_GAME_MODULE
+    // The launcher's build: the next start makes the game again with this address in it.
+    const char *msg =
+        "\n[albw] The game has reached code that has not been translated yet (0x%08x).\n"
+        "[albw] It is noted in %s.\n"
+        "[albw] Start World Across again: it translates what is missing, which takes a few\n"
+        "[albw] minutes, and you go on from your last save.\n\n";
+#else
     const char *msg =
         "\n[albw] The game has reached code this build has not translated yet (0x%08x).\n"
         "[albw] It is noted in %s.\n"
         "[albw] Run tools/catch_up.sh to translate it into the build, then start the game again;\n"
         "[albw] anything since your last save is lost.\n\n";
+#endif
     printf(msg, target, path);
     fprintf(stderr, msg, target, path);
     fflush(stdout);
 #ifdef ALBW_HAVE_WINDOW
     char text[900];
+#ifdef ALBW_GAME_MODULE
+    snprintf(text, sizeof text,
+             "The game has reached code that has not been translated yet (0x%08x).\n\n"
+             "Start World Across again: it translates what is missing first, which takes a few "
+             "minutes, and then you can go on from your last save. Anything since then is lost.\n\n"
+             "(Noted in %s.)", target, path);
+#else
     snprintf(text, sizeof text,
              "The game has reached code this build has not translated yet (0x%08x).\n\n"
              "It is noted in %s.\n\nRun tools/catch_up.sh to translate it into the build, then "
              "start the game again; anything since your last save is lost.", target, path);
+#endif
     albw_window_message("World Across: untranslated code", text);
 #endif
 }
@@ -655,7 +672,10 @@ static int game_try(const char *card) {
     struct stat st;
     if (stat(albw_build_module_path(), &st) != 0) return 0;
     if (!module_lib && !albw_build_current()) {
-        printf("[game ] the game was made by another version of World Across; it is made again\n");
+        if (albw_build_has_missing())
+            printf("[game ] the last run reached code the game lacks; it is made again with it\n");
+        else
+            printf("[game ] the game was made by another version of World Across; it is made again\n");
         return 0;
     }
     if (!module_lib && !module_load(albw_build_module_path())) return 0;
