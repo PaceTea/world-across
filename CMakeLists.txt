@@ -4,6 +4,11 @@ project(albw-port C)
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 
+# Paths compiled into the programs -- assert messages, __FILE__ -- relative to the checkout and the
+# build folder, not to this machine: a published program names no one's directories. (The build
+# folder last, since it may lie inside the checkout and the last map that fits is the one used.)
+add_compile_options("-ffile-prefix-map=${CMAKE_SOURCE_DIR}/=" "-ffile-prefix-map=${CMAKE_BINARY_DIR}/=")
+
 # The generated translation unit is one huge file of straight-line code. -O1 keeps build
 # times sane; the optimiser has little to work with at -O2 here anyway.
 # The recompiler decides how many translation units to emit, so glob them. CONFIGURE_DEPENDS
