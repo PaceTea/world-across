@@ -15,7 +15,7 @@ project is not affiliated with, endorsed by or connected to Nintendo. *The Legen
 **Status: the opening is playable.** The game gets through Horizon's service handshakes, reads
 archives out of its RomFS, answers its configuration queries, formats and opens its save data and
 starts its threads. It shows the loading screen, the title screen with its lit 3D scene, the file
-select and the name entry -- the software keyboard is answered with your login name -- and plays
+select and the name entry -- Rename opens a field to type your name in -- and plays
 through the opening into Link's house and out of its door: Gulley's dialogue, walking, the map on
 the bottom screen, the item menu, the weather vane that saves the game, and loading that save
 again. Further in, the game reaches code nobody has translated yet; the port then stops, notes the
@@ -238,8 +238,8 @@ nothing runs or sounds before. Behind the menu goes a picture of your own if you
 `~/.config/albw-port/background.png` (or `.jpg`); none comes with the port. The menu is set in Fira
 Sans Condensed where it is installed, and the title in Cinzel if you have that. Settings
 (fullscreen, how the screens are arranged, the renderer, its resolution and anti-aliasing,
-upscaling and its sharpening, the frame rate, whole-pixel scaling, sound, gamepads, the game's
-language) are applied at once and saved in
+upscaling and its sharpening, the frame rate, whole-pixel scaling, sound, gamepads, the touch screen
+controls, the game's language) are applied at once and saved in
 `~/.config/albw-port/settings`; the environment variables below still win over them. Choices this
 build or machine cannot do -- FSR 3 or DLSS without their SDKs, DLSS without an RTX card, frame
 generation for now -- are shown dimmed, with what they would take. In game,
@@ -255,10 +255,27 @@ the picture keeps its shape.
 | X, Y | I, U | top and left face buttons |
 | L, R | Q, E | shoulder buttons or triggers |
 | Start, Select | Enter, Backspace | Start, Back |
-| Touch screen | left mouse button on the bottom screen | — |
+| Touch screen | left mouse button on the bottom screen | touchpad, or right stick and gyroscope (below) |
 
 The face buttons go by position, not by label: the console's A is on the right and its B at the
 bottom, and that is what hands remember, whatever the pad prints on them.
+
+The touch screen from a gamepad, as the Touch Screen Controls setting has it (Mouse, Touchpad,
+Gyro, or Both, the default; the mouse works with all of them):
+
+- **Touchpad** -- a DualShock 4's, a DualSense's, or either of the Steam Controller's: a finger on
+  it shows a small ring on the bottom screen, the whole pad standing for the whole screen, and
+  pressing the pad in touches the screen there.
+- **Gyro**, for pads without a touchpad: press the right stick in and the ring appears in the
+  middle; tilt and turn the pad to move it. Press the stick in again to touch -- held, it drags --
+  and let go: the touch ends and the ring is gone.
+
+The ring never leaves the screen.
+
+**Rename** on the file screen opens the console's keyboard, and the window shows a field for it:
+type the name, or pick keys with a gamepad (A types, B deletes, X shifts, Y is a space) or the
+mouse; Enter or Start confirms, Esc keeps the name the game offered. Without a window -- headless,
+the tools -- or with `ALBW_USERNAME` set, that name (or the login name) is confirmed at once.
 
 | Key | Does |
 | --- | --- |
@@ -279,6 +296,8 @@ bottom, and that is what hands remember, whatever the pad prints on them.
 | `ALBW_INTEGER_SCALE` | keep every pixel the same size when scaling |
 | `ALBW_MUTE=1` | no sound |
 | `ALBW_GAMEPADS=0` | ignore gamepads, keyboard and mouse only |
+| `ALBW_PROMPT_TYPE=<text>` | type that into the name field as soon as it opens, and confirm it |
+| `ALBW_RING=<x>,<y>` | hold the gamepad's touch ring at that point of the bottom screen, for screenshots of it |
 | `ALBW_WAV=<file>` | also write the sound to a WAV file, with or without a window |
 | `ALBW_LANGUAGE` | the console's language, as a code (`en`, `fr`, `de`, ...) or a number |
 | `ALBW_USERNAME` | the name the game offers for the player (default: your login name) |

@@ -68,6 +68,11 @@ void albw_kernel_describe_handle(uint32_t handle, char *out, unsigned long n);
 void albw_kernel_init(void);
 // The card image the guest's RomFS comes from; opened on first file access.
 void albw_kernel_set_rom(const char *path);
+// Who types the software keyboard's text: `ask` shows the game's offered text (UTF-16) to the player
+// and returns 1 if it will be answered; `answer` returns 1 once it has been, with the text. Unset,
+// or declining, the offered text is confirmed at once.
+void albw_kernel_set_text_prompt(int (*ask)(const uint16_t *text, unsigned n, unsigned max_len),
+                                 int (*answer)(uint16_t *text, unsigned *n));
 unsigned long albw_svc_count(void);
 unsigned long albw_frame_count(void);          // vblanks so far
 

@@ -1,6 +1,6 @@
 pkgbase = world-across-bin
 	pkgdesc = The Legend of Zelda: A Link Between Worlds (3DS), recompiled natively; makes the game from your own cartridge dump
-	pkgver = 0.1.2
+	pkgver = 0.1.3
 	pkgrel = 1
 	url = https://github.com/PaceTea/world-across
 	arch = x86_64
@@ -28,11 +28,11 @@ pkgbase = world-across-bin
 	optdepends = alsa-lib: sound through ALSA
 	provides = world-across
 	conflicts = world-across
-	noextract = World-Across-0.1.2-x86_64.AppImage
+	noextract = World-Across-0.1.3-x86_64.AppImage
 	options = !strip
 	options = !debug
 	options = staticlibs
-	source = World-Across-0.1.2-x86_64.AppImage::https://github.com/PaceTea/world-across/releases/download/v0.1.2/World-Across-x86_64.AppImage
-	sha256sums = b0cbb9da0d5687e7150b1be3d49666a02305b5778133f2375af2b7d12e49671c
+	source = World-Across-0.1.3-x86_64.AppImage::https://github.com/PaceTea/world-across/releases/download/v0.1.3/World-Across-x86_64.AppImage
+	sha256sums = 5a568abf83434f46e5d6c9b59ee7fc280eb4affca2431901560b5c7101e9e06b
 
 pkgname = world-across-bin

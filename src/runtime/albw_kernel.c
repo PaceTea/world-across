@@ -825,25 +825,24 @@ static void apt_deliver_parameter(const albw_cpu *c, uint32_t command) {
 #define SWKBD_TEXT_OFFSET    0x144u
 #define SWKBD_TEXT_LENGTH    0x148u
 
-// The software keyboard, without a keyboard: it answers as if the player had confirmed the text the
-// game offered, or the console's user name when it offered none. Typing a name for real belongs to
-// the window, later; this is what lets the game get past its name entry at all.
-static void apt_swkbd(uint32_t config, uint32_t size, uint32_t block) {
+// The text the software keyboard starts with: what the game offered, or the console's user name when
+// it offered none. Returns its length, or -1 when the parameter block or the text buffer is not
+// usable; `max_len` is how long the game allows it to be.
+static int swkbd_offered(uint32_t config, uint32_t size, uint32_t block, uint16_t text[65],
+                         uint32_t *max_len) {
     int bi = handle_index(block);
     uint32_t shm = bi >= 0 ? (uint32_t)handles[bi].base : 0;
     uint32_t shm_size = bi >= 0 ? (uint32_t)handles[bi].size : 0;
     if (!albw_guest_ok(config, size) || size < 0x14C || !shm) {
         printf("[apt  ] software keyboard: no usable parameter block or text buffer\n");
-        return;
+        return -1;
     }
-    uint32_t max_len = albw_r16(config + SWKBD_MAX_TEXT_LEN);
-    if (!max_len || max_len > 64) max_len = 64;
-
-    uint16_t text[65];
+    *max_len = albw_r16(config + SWKBD_MAX_TEXT_LEN);
+    if (!*max_len || *max_len > 64) *max_len = 64;
     uint32_t n = 0;
     int32_t initial = (int32_t)albw_r32(config + SWKBD_INITIAL_TEXT);
     if (initial >= 0 && (uint32_t)initial + 2u <= shm_size) {
-        for (; n < max_len && (uint32_t)initial + n * 2u + 2u <= shm_size; n++) {
+        for (; n < *max_len && (uint32_t)initial + n * 2u + 2u <= shm_size; n++) {
             uint16_t ch = albw_r16(shm + (uint32_t)initial + n * 2u);
             if (!ch) break;
             text[n] = ch;
@@ -852,23 +851,41 @@ static void apt_swkbd(uint32_t config, uint32_t size, uint32_t block) {
     if (!n) {
         char name[11];
         albw_config_username(name);
-        for (; name[n] && n < max_len; n++) text[n] = (uint8_t)name[n];
+        for (; name[n] && n < *max_len; n++) text[n] = (uint8_t)name[n];
     }
-    // Into the shared block at offset 0, terminated, as the applet writes it.
+    return (int)n;
+}
+
+// The keyboard's answer, as the applet writes it: the text into the shared block at offset 0,
+// terminated, and the confirming button -- the rightmost, whose code depends on how many there are.
+static void swkbd_confirm(uint32_t config, uint32_t block, const uint16_t *text, uint32_t n) {
+    int bi = handle_index(block);
+    uint32_t shm = bi >= 0 ? (uint32_t)handles[bi].base : 0;
+    if (!shm) return;
     for (uint32_t i = 0; i < n; i++) albw_w16(shm + i * 2u, text[i]);
     albw_w16(shm + n * 2u, 0);
-
-    // The confirming button is the rightmost one, whose code depends on how many there are.
     static const int32_t confirm[3] = { 0, 2, 5 };
     uint32_t buttons = albw_r32(config + SWKBD_BUTTONS_M1);
     albw_w32(config + SWKBD_RESULT, (uint32_t)confirm[buttons < 3 ? buttons : 2]);
     albw_w32(config + SWKBD_TEXT_OFFSET, 0);
     albw_w16(config + SWKBD_TEXT_LENGTH, (uint16_t)n);
-
     char shown[65];
     for (uint32_t i = 0; i < n; i++) shown[i] = text[i] < 0x80 ? (char)text[i] : '?';
     shown[n] = '\0';
     printf("[apt  ] software keyboard: confirming \"%s\"\n", shown);
+}
+
+// With a window to ask in, the player types the text (albw_kernel_set_text_prompt): the game waits
+// for the applet as it would on the console, and the answer goes back once it comes, at a vblank.
+// Without one -- headless, the tools, a scripted run -- the offered text is confirmed at once.
+static int (*text_ask)(const uint16_t *text, unsigned n, unsigned max_len);
+static int (*text_answer)(uint16_t *text, unsigned *n);
+static struct { int waiting; uint32_t appid, config, size, block; } swkbd_wait;
+
+void albw_kernel_set_text_prompt(int (*ask)(const uint16_t *text, unsigned n, unsigned max_len),
+                                 int (*answer)(uint16_t *text, unsigned *n)) {
+    text_ask = ask;
+    text_answer = answer;
 }
 
 // Queues a parameter for the game and wakes whoever waits on APT's parameter event.
@@ -890,18 +907,46 @@ static void apt_queue_parameter(uint32_t sender, uint32_t signal, const uint8_t 
     }
 }
 
-// Runs a library applet to completion at once and queues the parameter it sends back.
-static void apt_run_applet(uint32_t appid, uint32_t config, uint32_t size, uint32_t block) {
-    printf("[apt  ] frame %lu: starting library applet %03x with a %u-byte parameter\n", gsp_frames,
-           appid, size);
-    if (appid == APT_APPID_SWKBD) apt_swkbd(config, size, block);
-
+// The applet done: its parameter block, with the answer filled in, is what it sends back.
+static void apt_send_back(uint32_t appid, uint32_t config, uint32_t size) {
     static uint8_t answer[APT_PARAM_MAX];
     uint32_t n = size < APT_PARAM_MAX ? size : APT_PARAM_MAX;
     for (uint32_t i = 0; i < n; i++) answer[i] = albw_guest_ok(config + i, 1) ? albw_r8(config + i) : 0;
-    // The applet is done the moment it starts; its parameter block, with the answer filled in, is
-    // what it sends back.
     apt_queue_parameter(appid, APT_COMMAND_WAKEUP_EXIT, answer, n, 0);
+}
+
+// Runs a library applet and queues the parameter it sends back: at once, except for a keyboard
+// that asks the player.
+static void apt_run_applet(uint32_t appid, uint32_t config, uint32_t size, uint32_t block) {
+    printf("[apt  ] frame %lu: starting library applet %03x with a %u-byte parameter\n", gsp_frames,
+           appid, size);
+    if (appid == APT_APPID_SWKBD) {
+        uint16_t text[65];
+        uint32_t max_len = 0;
+        int n = swkbd_offered(config, size, block, text, &max_len);
+        if (n >= 0 && text_ask && !albw_env("ALBW_USERNAME") && text_ask(text, (unsigned)n, max_len)) {
+            swkbd_wait.waiting = 1;
+            swkbd_wait.appid = appid;
+            swkbd_wait.config = config;
+            swkbd_wait.size = size;
+            swkbd_wait.block = block;
+            printf("[apt  ] software keyboard: asking the player\n");
+            return;
+        }
+        if (n >= 0) swkbd_confirm(config, block, text, (uint32_t)n);
+    }
+    apt_send_back(appid, config, size);
+}
+
+// The player's answer, when it has come.
+static void swkbd_poll(void) {
+    if (!swkbd_wait.waiting || !text_answer) return;
+    uint16_t text[65];
+    unsigned n = 0;
+    if (!text_answer(text, &n)) return;
+    swkbd_wait.waiting = 0;
+    swkbd_confirm(swkbd_wait.config, swkbd_wait.block, text, n);
+    apt_send_back(swkbd_wait.appid, swkbd_wait.config, swkbd_wait.size);
 }
 
 static void ipc_dispatch(albw_cpu *c, uint32_t session) {
@@ -2415,6 +2460,7 @@ int albw_kernel_on_idle(void) {
 
     gsp_frames++;
     if (kernel_time < vblank_at) kernel_time = vblank_at;
+    swkbd_poll();
     frame_time_log();
     dump_memory_if_asked();
     // ALBW_STOP_AT=<frame> ends the run there: a benchmark wants the same frames every time, and

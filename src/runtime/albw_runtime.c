@@ -856,6 +856,8 @@ int main(int argc, char **argv) {
     albw_launcher_set_builder(game_ready, game_build, albw_build_progress);
 #endif
     if (albw_window_open()) {
+        // The software keyboard asks the player, in the window.
+        albw_kernel_set_text_prompt(albw_prompt_ask, albw_prompt_answer);
         if (!albw_window_launch()) {
             albw_window_close();
             return 0;

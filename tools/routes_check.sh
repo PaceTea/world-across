@@ -59,11 +59,13 @@ route() {
         ALBW_RENDER=$((last - from + 1)) ALBW_RENDER_FROM="$from" \
         ALBW_DUMP_FRAMES="$(winpath "$new/$name")" ALBW_DUMP_FROM="$first" ALBW_DUMP_EVERY="$every" \
         ALBW_STOP_AT=$((last + 1)) timeout 1500 "${boot[@]}" > "$new/$name/run.log" 2>&1
-    if [ -s "$save/missing_entries.txt" ]; then
+    # missing_entries.txt from albw-boot, missing-<product>.txt from the launcher's game.
+    for missing in "$save"/missing_entries.txt "$save"/missing-*.txt; do
+        [ -s "$missing" ] || continue
         echo "routes_check: the $name route ran into untranslated code at" \
-             "$(tr '\n' ' ' < "$save/missing_entries.txt"); see $new/$name/run.log" >&2
+             "$(tr '\n' ' ' < "$missing"); see $new/$name/run.log" >&2
         exit 1
-    fi
+    done
     if ! ls "$new/$name"/frame-*.ppm > /dev/null 2>&1; then
         echo "routes_check: the $name route wrote no frames; see $new/$name/run.log" >&2
         exit 1

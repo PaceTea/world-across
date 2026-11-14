@@ -4,7 +4,7 @@
 # for a decrypted dump of a cartridge you own and makes the game from it, in
 # ~/.cache/albw-port/build, with the translator, Python and the C compiler it brings along.
 pkgname=world-across-bin
-pkgver=0.1.2
+pkgver=0.1.3
 pkgrel=1
 pkgdesc="The Legend of Zelda: A Link Between Worlds (3DS), recompiled natively; makes the game from your own cartridge dump"
 arch=('x86_64')
@@ -28,7 +28,7 @@ options=('!strip' '!debug' 'staticlibs')   # the kit's libgcc.a links the game
 _appimage="World-Across-$pkgver-x86_64.AppImage"
 source=("$_appimage::https://github.com/PaceTea/world-across/releases/download/v$pkgver/World-Across-x86_64.AppImage")
 noextract=("$_appimage")
-sha256sums=('b0cbb9da0d5687e7150b1be3d49666a02305b5778133f2375af2b7d12e49671c')
+sha256sums=('5a568abf83434f46e5d6c9b59ee7fc280eb4affca2431901560b5c7101e9e06b')
 
 prepare() {
     # The AppImage's own runtime unpacks it; no FUSE needed.

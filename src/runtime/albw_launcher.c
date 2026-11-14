@@ -42,6 +42,7 @@ static struct albw_settings settings = {
     .layout = ALBW_LAYOUT_STACKED, .antialias = ALBW_AA_4X, .upscale = ALBW_UPSCALE_OFF,
     .sharpness = 1,
     .frame_rate = ALBW_RATE_CONSOLE, .frame_gen = ALBW_FRAMEGEN_OFF, .sound = 1, .gamepads = 1,
+    .touch_controls = ALBW_TOUCH_BOTH,
 };
 
 // The words the settings file uses for each choice, in the order of the enums.
@@ -56,6 +57,7 @@ static const char *const resolution_keys[ALBW_RESOLUTIONS] = {
     "auto", "1", "2", "3", "4", "5", "6", "7", "8",
 };
 static const char *const aa_keys[ALBW_AAS] = { "off", "2", "4", "8" };
+static const char *const touch_keys[ALBW_TOUCHES] = { "mouse", "touchpad", "gyro", "both" };
 
 static int key_index(const char *const *keys, int count, const char *v, int otherwise) {
     for (int i = 0; i < count; i++) {
@@ -86,13 +88,13 @@ static void settings_save(void) {
     if (!f) return;
     fprintf(f, "fullscreen=%d\nlayout=%s\nrenderer=%s\nresolution=%s\nantialias=%s\nupscale=%s\n"
                "sharpness=%d\nframerate=%s\nframegen=%s\ninteger=%d\nsound=%d\ngamepads=%d\n"
-               "language=%s\n",
+               "touch=%s\nlanguage=%s\n",
             settings.fullscreen, layout_keys[settings.layout], renderer_keys[settings.renderer],
             resolution_keys[settings.resolution], aa_keys[settings.antialias],
             upscale_keys[settings.upscale],
             settings.sharpness, rate_keys[settings.frame_rate], framegen_keys[settings.frame_gen],
             settings.integer_scale, settings.sound, settings.gamepads,
-            languages[settings.language].code);
+            touch_keys[settings.touch_controls], languages[settings.language].code);
     fclose(f);
 }
 
@@ -141,6 +143,8 @@ const struct albw_settings *albw_settings_load(void) {
         else if (!strcmp(line, "integer")) settings.integer_scale = atoi(v) != 0;
         else if (!strcmp(line, "sound")) settings.sound = atoi(v) != 0;
         else if (!strcmp(line, "gamepads")) settings.gamepads = atoi(v) != 0;
+        else if (!strcmp(line, "touch"))
+            settings.touch_controls = key_index(touch_keys, ALBW_TOUCHES, v, ALBW_TOUCH_BOTH);
         else if (!strcmp(line, "language")) {
             for (int i = 0; i < LANGUAGES; i++) {
                 if (!strcmp(languages[i].code, v)) settings.language = i;
@@ -354,7 +358,7 @@ enum { PAGE_MAIN, PAGE_SETTINGS };
 enum { ITEM_PLAY, ITEM_SETTINGS, ITEM_MODS, ITEM_QUIT, MAIN_ITEMS };
 enum { ROW_FULLSCREEN, ROW_LAYOUT, ROW_RENDERER, ROW_RESOLUTION, ROW_AA, ROW_UPSCALE,
        ROW_SHARPNESS, ROW_FRAME_RATE, ROW_FRAME_GEN, ROW_INTEGER, ROW_SOUND, ROW_GAMEPADS,
-       ROW_LANGUAGE, ROW_BACK, SETTINGS_ROWS };
+       ROW_TOUCH, ROW_LANGUAGE, ROW_BACK, SETTINGS_ROWS };
 
 // The settings page, row by row. A row with few choices shows them all side by side, the chosen
 // one lit and the ones this build or machine cannot do dimmed; a row with many shows one, between
@@ -371,6 +375,7 @@ static const char *const rate_names[ALBW_RATES] = { "60 (console)", "Display", "
 static const char *const framegen_names[ALBW_FRAMEGENS] = { "Off", "FSR 3", "DLSS" };
 static const char *const renderer_names[ALBW_RENDERERS] = { "GPU", "Software" };
 static const char *const aa_names[ALBW_AAS] = { "Off", "2x MSAA", "4x MSAA", "8x MSAA" };
+static const char *const touch_names[ALBW_TOUCHES] = { "Mouse", "Touchpad", "Gyro", "Both" };
 // Each multiple with the height it gives the top screen.
 static const char *const resolution_names[ALBW_RESOLUTIONS] = {
     "Auto", "1x (240p)", "2x (480p)", "3x (720p)", "4x (960p)", "5x (1200p)", "6x (1440p)",
@@ -397,6 +402,7 @@ static const struct row_def {
     [ROW_INTEGER] = { "Whole-pixel scaling", on_off, 2, 1, -1 },
     [ROW_SOUND] = { "Sound", on_off, 2, 1, -1 },
     [ROW_GAMEPADS] = { "Gamepads", on_off, 2, 1, -1 },
+    [ROW_TOUCH] = { "Touch Screen Controls", touch_names, ALBW_TOUCHES, 1, -1 },
     [ROW_LANGUAGE] = { "Language", language_names, LANGUAGES, 0, -1 },
     [ROW_BACK] = { "Back", NULL, 0, 0, -1 },
 };
@@ -415,6 +421,7 @@ static int *row_value(int row) {
         case ROW_INTEGER: return &settings.integer_scale;
         case ROW_SOUND: return &settings.sound;
         case ROW_GAMEPADS: return &settings.gamepads;
+        case ROW_TOUCH: return &settings.touch_controls;
         case ROW_LANGUAGE: return &settings.language;
         default: return NULL;
     }
@@ -492,6 +499,15 @@ static const char *describe(int row, int choice) {
         case ROW_INTEGER: return "Scales by whole numbers only, so every pixel is the same size.";
         case ROW_SOUND: return "The game's music and sound.";
         case ROW_GAMEPADS: return "Every connected gamepad plays, as well as the keyboard.";
+        case ROW_TOUCH: {
+            static const char *const text[ALBW_TOUCHES] = {
+                "The mouse on the bottom screen is the stylus; gamepads leave the touch screen alone.",
+                "A finger on the touchpad shows a ring on the touch screen; press the pad in to touch.",
+                "Right stick in: a ring you aim by tilting the gamepad. In again to touch, held to drag.",
+                "The touchpad, and the right stick with the gyroscope. The mouse always works too.",
+            };
+            return text[choice];
+        }
         case ROW_LANGUAGE: return "The game's language, from the next start.";
         default: return NULL;
     }
@@ -615,9 +631,12 @@ static void card_take(void) {
     }
 }
 
+static SDL_Mutex *prompt_mutex;                         // the software keyboard's, below
+
 int albw_launcher_init(SDL_Window *w, SDL_Renderer *r) {
     window = w;
     renderer = r;
+    if (!prompt_mutex) prompt_mutex = SDL_CreateMutex();
     for (int i = 0; i < LANGUAGES; i++) language_names[i] = languages[i].name;
     // A condensed sans for the menu, as launchers of this kind have it: Fira Sans Condensed where it
     // is installed, else whatever sans the system has. The title takes Cinzel if the user has it.
@@ -847,6 +866,17 @@ enum albw_launcher_action albw_launcher_event(const SDL_Event *e) {
     return ALBW_LAUNCHER_NONE;
 }
 
+// Type sized by the window's height, as the rows that hold it are; only the title is held to the
+// width as well, so that it fits across a tall, narrow window.
+static void fonts_for(int W, int H) {
+    if (abs(H - baked_for_h) <= H / 20) return;
+    bake(&f_title, serif_data, H * 0.085f > W * 0.075f ? W * 0.075f : H * 0.085f);
+    bake(&f_kicker, small_data, H * 0.030f);
+    bake(&f_item, sans_data, H * 0.045f);
+    bake(&f_small, small_data, H * 0.023f);
+    baked_for_h = H;
+}
+
 // A rectangle shaded from one colour on the left to another on the right.
 static void gradient(float x0, float y0, float x1, float y1, SDL_FColor left, SDL_FColor right,
                      int vertical) {
@@ -880,15 +910,7 @@ void albw_launcher_draw(SDL_Texture *top) {
 
     int W, H;
     SDL_GetCurrentRenderOutputSize(renderer, &W, &H);
-    // Type sized by the window's height, as the rows that hold it are; only the title is held to
-    // the width as well, so that it fits across a tall, narrow window.
-    if (abs(H - baked_for_h) > H / 20) {
-        bake(&f_title, serif_data, H * 0.085f > W * 0.075f ? W * 0.075f : H * 0.085f);
-        bake(&f_kicker, small_data, H * 0.030f);
-        bake(&f_item, sans_data, H * 0.045f);
-        bake(&f_small, small_data, H * 0.023f);
-        baked_for_h = H;
-    }
+    fonts_for(W, H);
     SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
 
     // The player's picture if there is one, else the game's own top screen as it was left (in game),
@@ -1123,4 +1145,291 @@ void albw_launcher_draw(SDL_Texture *top) {
         text(&f_small, W - x0 - text_width(&f_small, credit), yb + H * 0.032f, credit, grey, 0.5f * fade);
     }
 #endif
+}
+
+// ---------------------------------------------------------------------------------------------
+// The software keyboard. When the game asks for text -- the player's name -- a field over the
+// window takes it: typed on the keyboard, or picked from keys drawn below it with a gamepad (A
+// types, B deletes, X shifts, Y is a space, Start confirms) or the mouse. The game waits for it as
+// it waits for the console's keyboard. The kernel asks from the game's thread, the window answers
+// from its own, so what passes between them is under a lock.
+
+static SDL_Mutex *prompt_mutex;
+static int prompt_asked, prompt_answered;               // under prompt_mutex
+static unsigned prompt_max, prompt_n, prompt_offered_n, prompt_answer_n;
+static uint16_t prompt_text[65], prompt_offered[65], prompt_answer[65];
+static int prompt_open;                                  // the window's: the field is up
+static int prompt_row = 1, prompt_col, prompt_shift = 1, prompt_stick_x, prompt_stick_y;
+static uint64_t prompt_since;
+static const char *const prompt_keys[4] = { "1234567890", "QWERTYUIOP", "ASDFGHJKL-", "ZXCVBNM.'!" };
+enum { PROMPT_SHIFT, PROMPT_SPACE, PROMPT_DELETE, PROMPT_OK, PROMPT_SPECIALS };
+static const char *const prompt_special_names[PROMPT_SPECIALS] = { "Shift", "Space", "Delete", "OK" };
+static struct { SDL_FRect r; int row, col; } prompt_hits[48];
+static int prompt_hit_count;
+
+int albw_prompt_ask(const uint16_t *text, unsigned n, unsigned max_len) {
+    if (!prompt_mutex || !small_data || !sans_data) return 0;    // nothing to set the field in
+    if (max_len > 64) max_len = 64;
+    if (n > max_len) n = max_len;
+    SDL_LockMutex(prompt_mutex);
+    prompt_max = max_len;
+    prompt_n = prompt_offered_n = n;
+    memcpy(prompt_text, text, n * sizeof *text);
+    memcpy(prompt_offered, text, n * sizeof *text);
+    prompt_asked = 1;
+    prompt_answered = 0;
+    SDL_UnlockMutex(prompt_mutex);
+    return 1;
+}
+
+int albw_prompt_answer(uint16_t *text, unsigned *n) {
+    if (!prompt_mutex) return 0;
+    SDL_LockMutex(prompt_mutex);
+    int done = prompt_answered;
+    if (done) {
+        memcpy(text, prompt_answer, prompt_answer_n * sizeof *text);
+        *n = prompt_answer_n;
+        prompt_answered = 0;
+    }
+    SDL_UnlockMutex(prompt_mutex);
+    return done;
+}
+
+static void prompt_finish(int keep_offered);
+static void prompt_type(unsigned cp);
+
+int albw_prompt_visible(void) {
+    if (!prompt_mutex) return 0;
+    SDL_LockMutex(prompt_mutex);
+    int asked = prompt_asked;
+    SDL_UnlockMutex(prompt_mutex);
+    if (asked && !prompt_open) {
+        prompt_open = 1;
+        prompt_row = 1;
+        prompt_col = 0;
+        prompt_since = SDL_GetTicksNS();
+        SDL_StartTextInput(window);
+        // ALBW_PROMPT_TYPE=<text> types that in place of the offered text and confirms it, for
+        // checking the way back to the game without a hand on the keyboard.
+        const char *typed = getenv("ALBW_PROMPT_TYPE");
+        if (typed && *typed) {
+            prompt_n = 0;
+            while (*typed) prompt_type(next_cp(&typed));
+            prompt_finish(0);
+            return 0;
+        }
+    }
+    return asked;
+}
+
+static void prompt_finish(int keep_offered) {
+    SDL_LockMutex(prompt_mutex);
+    if (keep_offered || !prompt_n) {
+        memcpy(prompt_answer, prompt_offered, prompt_offered_n * sizeof *prompt_answer);
+        prompt_answer_n = prompt_offered_n;
+    } else {
+        memcpy(prompt_answer, prompt_text, prompt_n * sizeof *prompt_answer);
+        prompt_answer_n = prompt_n;
+    }
+    prompt_asked = 0;
+    prompt_answered = 1;
+    SDL_UnlockMutex(prompt_mutex);
+    prompt_open = 0;
+    SDL_StopTextInput(window);
+}
+
+// A character the field takes: what the menu's type can show, which is what a name needs.
+static void prompt_type(unsigned cp) {
+    if (cp < 32 || cp == 127 || (cp >= 128 && cp < 160) || cp >= FIRST_CHAR + CHARS) return;
+    if (prompt_n >= prompt_max) return;
+    prompt_text[prompt_n++] = (uint16_t)cp;
+    // After a capital the keys go small, as a name goes on.
+    if (prompt_shift == 1 && cp != ' ') prompt_shift = 0;
+}
+
+static void prompt_press(int row, int col) {
+    if (row < 4) {
+        char ch = prompt_keys[row][col];
+        if (ch >= 'A' && ch <= 'Z' && !prompt_shift) ch = (char)(ch - 'A' + 'a');
+        prompt_type((unsigned char)ch);
+        return;
+    }
+    switch (col) {
+        case PROMPT_SHIFT: prompt_shift = !prompt_shift; break;
+        case PROMPT_SPACE: prompt_type(' '); break;
+        case PROMPT_DELETE: if (prompt_n) prompt_n--; break;
+        case PROMPT_OK: if (prompt_n) prompt_finish(0); break;
+    }
+}
+
+static void prompt_move(int dx, int dy) {
+    int rows = 5;
+    prompt_row = (prompt_row + dy + rows) % rows;
+    int cols = prompt_row < 4 ? 10 : PROMPT_SPECIALS;
+    if (dy) {
+        // Between the letters and the wide keys below, keep to the same part of the board.
+        if (prompt_row == 4 && dy) prompt_col = prompt_col * PROMPT_SPECIALS / 10;
+        else if (prompt_row == 0 && dy > 0) prompt_col = prompt_col * 10 / PROMPT_SPECIALS;
+        else if (prompt_row == 3 && dy < 0) prompt_col = prompt_col * 10 / PROMPT_SPECIALS;
+    }
+    if (prompt_col >= cols) prompt_col = cols - 1;
+    prompt_col = (prompt_col + dx + cols) % cols;
+}
+
+void albw_prompt_event(const SDL_Event *e) {
+    switch (e->type) {
+        case SDL_EVENT_TEXT_INPUT: {
+            const char *p = e->text.text;
+            while (*p) prompt_type(next_cp(&p));
+            break;
+        }
+        case SDL_EVENT_KEY_DOWN:
+            switch (e->key.scancode) {
+                case SDL_SCANCODE_BACKSPACE: if (prompt_n) prompt_n--; break;
+                case SDL_SCANCODE_RETURN: case SDL_SCANCODE_KP_ENTER:
+                    if (!e->key.repeat && prompt_n) prompt_finish(0);
+                    break;
+                case SDL_SCANCODE_ESCAPE: if (!e->key.repeat) prompt_finish(1); break;
+                case SDL_SCANCODE_UP: prompt_move(0, -1); break;
+                case SDL_SCANCODE_DOWN: prompt_move(0, 1); break;
+                case SDL_SCANCODE_LEFT: prompt_move(-1, 0); break;
+                case SDL_SCANCODE_RIGHT: prompt_move(1, 0); break;
+                default: break;
+            }
+            break;
+        case SDL_EVENT_GAMEPAD_BUTTON_DOWN:
+            switch (e->gbutton.button) {
+                case SDL_GAMEPAD_BUTTON_DPAD_UP: prompt_move(0, -1); break;
+                case SDL_GAMEPAD_BUTTON_DPAD_DOWN: prompt_move(0, 1); break;
+                case SDL_GAMEPAD_BUTTON_DPAD_LEFT: prompt_move(-1, 0); break;
+                case SDL_GAMEPAD_BUTTON_DPAD_RIGHT: prompt_move(1, 0); break;
+                case SDL_GAMEPAD_BUTTON_EAST: prompt_press(prompt_row, prompt_col); break;   // A
+                case SDL_GAMEPAD_BUTTON_SOUTH: if (prompt_n) prompt_n--; break;              // B
+                case SDL_GAMEPAD_BUTTON_NORTH: prompt_shift = !prompt_shift; break;          // X
+                case SDL_GAMEPAD_BUTTON_WEST: prompt_type(' '); break;                       // Y
+                case SDL_GAMEPAD_BUTTON_START: if (prompt_n) prompt_finish(0); break;
+                default: break;
+            }
+            break;
+        case SDL_EVENT_GAMEPAD_AXIS_MOTION: {
+            int *last = e->gaxis.axis == SDL_GAMEPAD_AXIS_LEFTX ? &prompt_stick_x
+                      : e->gaxis.axis == SDL_GAMEPAD_AXIS_LEFTY ? &prompt_stick_y : NULL;
+            if (!last) break;
+            int dir = e->gaxis.value > 20000 ? 1 : e->gaxis.value < -20000 ? -1 : 0;
+            if (dir && dir != *last) {
+                if (last == &prompt_stick_x) prompt_move(dir, 0);
+                else prompt_move(0, dir);
+            }
+            *last = dir;
+            break;
+        }
+        case SDL_EVENT_MOUSE_MOTION:
+        case SDL_EVENT_MOUSE_BUTTON_DOWN: {
+            float x = e->type == SDL_EVENT_MOUSE_MOTION ? e->motion.x : e->button.x;
+            float y = e->type == SDL_EVENT_MOUSE_MOTION ? e->motion.y : e->button.y;
+            float scale = SDL_GetWindowPixelDensity(window);
+            x *= scale;
+            y *= scale;
+            for (int i = 0; i < prompt_hit_count; i++) {
+                const SDL_FRect *r = &prompt_hits[i].r;
+                if (x < r->x || x > r->x + r->w || y < r->y || y > r->y + r->h) continue;
+                prompt_row = prompt_hits[i].row;
+                prompt_col = prompt_hits[i].col;
+                if (e->type == SDL_EVENT_MOUSE_BUTTON_DOWN && e->button.button == SDL_BUTTON_LEFT)
+                    prompt_press(prompt_row, prompt_col);
+                break;
+            }
+            break;
+        }
+        default: break;
+    }
+}
+
+// UTF-16 to UTF-8, for the field.
+static void prompt_utf8(const uint16_t *t, unsigned n, char *out, size_t size) {
+    size_t w = 0;
+    for (unsigned i = 0; i < n && w + 4 < size; i++) {
+        unsigned c = t[i];
+        if (c < 0x80) out[w++] = (char)c;
+        else if (c < 0x800) {
+            out[w++] = (char)(0xC0 | (c >> 6));
+            out[w++] = (char)(0x80 | (c & 0x3F));
+        } else out[w++] = '?';
+    }
+    out[w] = '\0';
+}
+
+static void prompt_box(float x, float y, float w, float h, float r, float g, float b, float a) {
+    SDL_SetRenderDrawColorFloat(renderer, r, g, b, a);
+    SDL_FRect rect = { x, y, w, h };
+    SDL_RenderFillRect(renderer, &rect);
+}
+
+void albw_prompt_draw(void) {
+    if (!prompt_open) return;
+    int W, H;
+    SDL_GetCurrentRenderOutputSize(renderer, &W, &H);
+    fonts_for(W, H);
+    SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
+    const SDL_Color white = { 255, 255, 255, 255 }, gold = { 244, 196, 92, 255 },
+                    grey = { 175, 170, 160, 255 }, dark = { 30, 22, 14, 255 };
+    prompt_box(0, 0, (float)W, (float)H, 0.03f, 0.02f, 0.02f, 0.88f);
+
+    float pw = fminf(W * 0.92f, H * 1.05f), x0 = (W - pw) / 2.0f;
+    float y = H * 0.22f;
+    text(&f_kicker, x0, y, "YOUR NAME", gold, 1.0f);
+    char count[32];
+    snprintf(count, sizeof count, "%u / %u", prompt_n, prompt_max);
+    text(&f_small, x0 + pw - text_width(&f_small, count), y, count, grey, 0.8f);
+
+    // The field, with a caret that blinks.
+    float fy = y + H * 0.025f, fh = H * 0.085f;
+    prompt_box(x0, fy, pw, fh, 1, 1, 1, 0.10f);
+    prompt_box(x0, fy + fh - 2.0f, pw, 2.0f, 0.96f, 0.77f, 0.36f, 0.9f);
+    char field[200];
+    prompt_utf8(prompt_text, prompt_n, field, sizeof field);
+    float end = text(&f_item, x0 + H * 0.02f, fy + fh * 0.70f, field, white, 1.0f);
+    if (((SDL_GetTicksNS() - prompt_since) / 500000000u) % 2 == 0)
+        prompt_box(end + 2.0f, fy + fh * 0.22f, 2.0f, fh * 0.56f, 1, 1, 1, 0.9f);
+
+    // The keys: four rows of ten, and the wide ones below.
+    float ky = fy + fh + H * 0.04f, gap = pw * 0.012f;
+    float kw = (pw - gap * 9) / 10.0f, kh = fminf(kw * 0.8f, H * 0.075f);
+    prompt_hit_count = 0;
+    for (int row = 0; row < 5; row++) {
+        int cols = row < 4 ? 10 : PROMPT_SPECIALS;
+        float w = row < 4 ? kw : (pw - gap * (PROMPT_SPECIALS - 1)) / PROMPT_SPECIALS;
+        for (int col = 0; col < cols; col++) {
+            float kx = x0 + col * (w + gap), yy = ky + row * (kh + gap);
+            int sel = row == prompt_row && col == prompt_col;
+            int lit = row == 4 && col == PROMPT_SHIFT && prompt_shift;
+            if (sel) prompt_box(kx, yy, w, kh, 0.96f, 0.77f, 0.36f, 0.95f);
+            else prompt_box(kx, yy, w, kh, 1, 1, 1, lit ? 0.22f : 0.08f);
+            char label[8];
+            if (row < 4) {
+                char ch = prompt_keys[row][col];
+                if (ch >= 'A' && ch <= 'Z' && !prompt_shift) ch = (char)(ch - 'A' + 'a');
+                label[0] = ch;
+                label[1] = '\0';
+            } else {
+                snprintf(label, sizeof label, "%s", prompt_special_names[col]);
+            }
+            const struct font *f = row < 4 ? &f_item : &f_small;
+            float tw = text_width(f, label);
+            text(f, kx + (w - tw) / 2.0f, yy + kh * (row < 4 ? 0.72f : 0.64f), label,
+                 sel ? dark : white, row == 4 && col == PROMPT_OK && !prompt_n ? 0.4f : 1.0f);
+            if (prompt_hit_count < (int)(sizeof prompt_hits / sizeof prompt_hits[0])) {
+                prompt_hits[prompt_hit_count].r = (SDL_FRect){ kx, yy, w, kh };
+                prompt_hits[prompt_hit_count].row = row;
+                prompt_hits[prompt_hit_count].col = col;
+                prompt_hit_count++;
+            }
+        }
+    }
+    char hint[200], offered[100];
+    prompt_utf8(prompt_offered, prompt_offered_n, offered, sizeof offered);
+    float hy = ky + 5 * (kh + gap) + H * 0.03f;
+    text(&f_small, x0, hy, "Type it, or pick keys: A types, B deletes, X shifts, Y is a space.", grey, 0.85f);
+    snprintf(hint, sizeof hint, "Enter or Start confirms. Esc keeps \"%s\".", offered);
+    text(&f_small, x0, hy + H * 0.032f, hint, grey, 0.85f);
 }

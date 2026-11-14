@@ -1031,6 +1031,113 @@ const struct albw_input *albw_window_input(void) { return game_threaded ? &game_
 // ---------------------------------------------------------------------------------------------
 // Input.
 
+// The touch screen from a gamepad (the Touch Screen Controls setting). A finger on a touchpad -- a
+// DualShock 4's, a DualSense's, either of the Steam Controller's -- shows a small ring on the bottom
+// screen, the whole pad standing for the whole screen, and pressing the pad in touches there.
+// Without a touchpad, the right stick pressed in shows the ring in the middle and the gyroscope
+// moves it; pressed in again it touches, held it drags, and let go the ring is gone. The ring never
+// leaves the screen. The mouse works whatever the setting.
+static struct {
+    float x, y;                                          // in the bottom screen's pixels
+    int shown, touching;
+    int gyro;                                            // 0 off, 1 aiming, 2 touching (stick held)
+    int stick_was;                                       // the right stick's button, last frame
+    uint64_t last_ns;
+} ring;
+#define GYRO_PIXELS_PER_RADIAN 450.0f                    // a turn of 40 degrees crosses the screen
+#define GYRO_STILL 0.02f                                 // rad/s: below it, a hand's tremor
+
+static void ring_update(int use_pad, int use_gyro, int finger, float fx, float fy, int click,
+                        int stick, int have_gyro, const float gyro[3]) {
+    uint64_t now = SDL_GetTicksNS();
+    float dt = ring.last_ns ? (float)(now - ring.last_ns) / 1e9f : 0.0f;
+    if (dt > 0.05f) dt = 0.05f;
+    ring.last_ns = now;
+    int pressed = stick && !ring.stick_was, released = !stick && ring.stick_was;
+    ring.stick_was = stick;
+    if (rect_bottom.w <= 0 || albw_launcher_visible()) {
+        ring.shown = ring.touching = ring.gyro = 0;
+        return;
+    }
+    if (use_gyro && have_gyro) {
+        if (ring.gyro == 0 && pressed) {
+            ring.gyro = 1;
+            if (!ring.shown) {
+                ring.x = BOTTOM_W / 2.0f;
+                ring.y = SCREEN_H / 2.0f;
+            }
+        } else if (ring.gyro == 1 && pressed) {
+            ring.gyro = 2;
+        } else if (ring.gyro == 2 && released) {
+            ring.gyro = 0;
+        }
+        if (ring.gyro) {
+            // Turning the pad left moves the ring left; tipping its front up moves it up.
+            float yaw = fabsf(gyro[1]) > GYRO_STILL ? gyro[1] : 0.0f;
+            float pitch = fabsf(gyro[0]) > GYRO_STILL ? gyro[0] : 0.0f;
+            ring.x -= yaw * GYRO_PIXELS_PER_RADIAN * dt;
+            ring.y -= pitch * GYRO_PIXELS_PER_RADIAN * dt;
+        }
+    } else {
+        ring.gyro = 0;
+    }
+    finger = finger && use_pad;
+    if (albw_prompt_visible()) {
+        ring.shown = ring.touching = ring.gyro = 0;
+        return;
+    }
+    // ALBW_RING=<x>,<y> holds a finger there, for screenshots of the ring.
+    static int test_ring = -1;
+    static float test_x, test_y;
+    if (test_ring < 0) test_ring = albw_env("ALBW_RING") && sscanf(albw_env("ALBW_RING"), "%f,%f", &test_x, &test_y) == 2;
+    if (test_ring) {
+        finger = 1;
+        fx = test_x / BOTTOM_W;
+        fy = test_y / SCREEN_H;
+    }
+    if (finger) {
+        ring.x = fx * BOTTOM_W;
+        ring.y = fy * SCREEN_H;
+    }
+    ring.x = fminf(fmaxf(ring.x, 0.0f), BOTTOM_W - 1.0f);
+    ring.y = fminf(fmaxf(ring.y, 0.0f), SCREEN_H - 1.0f);
+    ring.shown = finger || ring.gyro;
+    ring.touching = ring.shown && ((click && use_pad) || ring.gyro == 2);
+}
+
+// The ring, over the bottom screen: a faint disc with a brighter edge, brighter still while it
+// touches.
+static void screens_in_pixels(SDL_FRect *top, SDL_FRect *bottom);
+static void draw_ring(void) {
+    if (!ring.shown || rect_bottom.w <= 0 || albw_launcher_visible()) return;
+    SDL_FRect top, bottom;
+    screens_in_pixels(&top, &bottom);
+    float s = bottom.w / BOTTOM_W;
+    float cx = bottom.x + (ring.x + 0.5f) * s, cy = bottom.y + (ring.y + 0.5f) * s;
+    float r = fmaxf(7.0f * s, 8.0f);
+    enum { SEGMENTS = 32 };
+    SDL_Vertex v[SEGMENTS + 1];
+    int idx[SEGMENTS * 3];
+    SDL_FColor fill = { 1.0f, 1.0f, 1.0f, ring.touching ? 0.45f : 0.22f };
+    v[0] = (SDL_Vertex){ { cx, cy }, fill, { 0, 0 } };
+    SDL_FPoint edge[SEGMENTS + 1];
+    for (int i = 0; i < SEGMENTS; i++) {
+        float a = (float)i * 6.2831853f / SEGMENTS;
+        v[i + 1] = (SDL_Vertex){ { cx + r * cosf(a), cy + r * sinf(a) }, fill, { 0, 0 } };
+        edge[i] = v[i + 1].position;
+        idx[i * 3] = 0;
+        idx[i * 3 + 1] = i + 1;
+        idx[i * 3 + 2] = (i + 1) % SEGMENTS + 1;
+    }
+    edge[SEGMENTS] = edge[0];
+    SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
+    SDL_RenderGeometry(renderer, NULL, v, SEGMENTS + 1, idx, SEGMENTS * 3);
+    SDL_SetRenderDrawColor(renderer, 255, 255, 255, ring.touching ? 230 : 160);
+    SDL_RenderLines(renderer, edge, SEGMENTS + 1);
+    SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_NONE);
+    set_presentation();
+}
+
 static int16_t axis_from_keys(int negative, int positive) {
     return (int16_t)((positive ? ALBW_CIRCLE_MAX : 0) - (negative ? ALBW_CIRCLE_MAX : 0));
 }
@@ -1060,6 +1167,11 @@ static void read_input(void) {
     // that is what hands remember.
     // ALBW_GAMEPADS=0 leaves them all out, for a pad lying on the desk that the game would
     // otherwise hear.
+    int touch_mode = albw_settings()->touch_controls;
+    int use_pad = touch_mode == ALBW_TOUCH_TOUCHPAD || touch_mode == ALBW_TOUCH_BOTH;
+    int use_gyro = touch_mode == ALBW_TOUCH_GYRO || touch_mode == ALBW_TOUCH_BOTH;
+    int finger = 0, click = 0, stick = 0, have_gyro = 0;
+    float fx = 0.0f, fy = 0.0f, gyro[3] = { 0.0f, 0.0f, 0.0f };
     int count = 0;
     SDL_JoystickID *ids = pads_wanted ? SDL_GetGamepads(&count) : NULL;
     for (int i = 0; ids && i < count; i++) {
@@ -1088,6 +1200,35 @@ static void read_input(void) {
         if (SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFT_TRIGGER) > 16000) in.buttons |= ALBW_PAD_L;
         if (SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) > 16000) in.buttons |= ALBW_PAD_R;
 
+        // The touchpads: the last finger found down is the one that counts. The Steam Controller's
+        // right pad clicks as MISC2, its left one -- and the PlayStation pads' only one -- as
+        // TOUCHPAD.
+        int pads = use_pad ? SDL_GetNumGamepadTouchpads(pad) : 0;
+        for (int t = 0; t < pads; t++) {
+            int fingers = SDL_GetNumGamepadTouchpadFingers(pad, t);
+            for (int f = 0; f < fingers; f++) {
+                bool down = false;
+                float x, y, pressure;
+                if (SDL_GetGamepadTouchpadFinger(pad, t, f, &down, &x, &y, &pressure) && down) {
+                    finger = 1;
+                    fx = x;
+                    fy = y;
+                }
+            }
+        }
+        if (pads > 0 && SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_TOUCHPAD)) click = 1;
+        if (pads > 1 && SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_MISC2)) click = 1;
+        if (SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_RIGHT_STICK)) stick = 1;
+        if (use_gyro && SDL_GamepadHasSensor(pad, SDL_SENSOR_GYRO)) {
+            if (!SDL_GamepadSensorEnabled(pad, SDL_SENSOR_GYRO))
+                SDL_SetGamepadSensorEnabled(pad, SDL_SENSOR_GYRO, true);
+            float g[3];
+            if (!have_gyro && SDL_GetGamepadSensorData(pad, SDL_SENSOR_GYRO, g, 3)) {
+                have_gyro = 1;
+                memcpy(gyro, g, sizeof g);
+            }
+        }
+
         float sx = SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFTX) / 32767.0f;
         float sy = -SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFTY) / 32767.0f;
         if (sqrtf(sx * sx + sy * sy) > 0.25f) {          // a dead zone, so a resting stick is still
@@ -1111,6 +1252,13 @@ static void read_input(void) {
     if (in.circle_y > 40) in.buttons |= ALBW_PAD_CIRCLE_UP;
     if (in.circle_y < -40) in.buttons |= ALBW_PAD_CIRCLE_DOWN;
 
+    // The gamepad's ring touches where it is; the mouse, pressed on the bottom screen, wins.
+    ring_update(use_pad, use_gyro, finger, fx, fy, click, stick, have_gyro, gyro);
+    if (ring.touching) {
+        in.touching = 1;
+        in.touch_x = (uint16_t)ring.x;
+        in.touch_y = (uint16_t)ring.y;
+    }
     // The mouse on the bottom screen is a finger on the touch screen.
     float mx, my, lx, ly;
     SDL_MouseButtonFlags buttons = SDL_GetMouseState(&mx, &my);
@@ -1122,8 +1270,9 @@ static void read_input(void) {
         in.touch_x = (uint16_t)(lx - rect_bottom.x);
         in.touch_y = (uint16_t)(ly - rect_bottom.y);
     }
-    // The launcher has the controls while it is up; the game hears nothing.
-    if (albw_launcher_visible()) memset(&in, 0, sizeof in);
+    // The launcher has the controls while it is up, and the name field while it is; the game hears
+    // nothing.
+    if (albw_launcher_visible() || albw_prompt_visible()) memset(&in, 0, sizeof in);
     // The first changes of the buttons, so a run that moved on without anybody touching anything
     // says which control did it.
     static unsigned changes;
@@ -1191,6 +1340,12 @@ static void show(void) {
         if (tex_top) SDL_RenderTexture(renderer, tex_top, NULL, &rect_top);
         if (tex_bottom && rect_bottom.w > 0) SDL_RenderTexture(renderer, tex_bottom, NULL, &rect_bottom);
     }
+    draw_ring();
+    if (!albw_launcher_visible() && albw_prompt_visible()) {
+        SDL_SetRenderLogicalPresentation(renderer, 0, 0, SDL_LOGICAL_PRESENTATION_DISABLED);
+        albw_prompt_draw();
+        set_presentation();
+    }
     if (albw_launcher_visible()) {
         // Over the whole window, in its own pixels, not the screens' letterboxed ones.
         SDL_SetRenderLogicalPresentation(renderer, 0, 0, SDL_LOGICAL_PRESENTATION_DISABLED);
@@ -1234,6 +1389,14 @@ static int handle_events(void) {
                 default: break;
             }
             if (e.type == SDL_EVENT_KEY_DOWN && e.key.scancode != SDL_SCANCODE_F11) continue;
+        }
+        // The name field, while the game waits for it, has the keyboard, the pads and the mouse;
+        // F11 and closing the window still work.
+        if (!albw_launcher_visible() && albw_prompt_visible() && e.type != SDL_EVENT_QUIT
+                && e.type != SDL_EVENT_WINDOW_CLOSE_REQUESTED
+                && !(e.type == SDL_EVENT_KEY_DOWN && e.key.scancode == SDL_SCANCODE_F11)) {
+            albw_prompt_event(&e);
+            continue;
         }
         switch (e.type) {
             case SDL_EVENT_QUIT:

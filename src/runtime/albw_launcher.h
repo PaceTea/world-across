@@ -39,6 +39,10 @@ enum { ALBW_RENDERER_GPU, ALBW_RENDERER_SOFTWARE, ALBW_RENDERERS };
 // Its anti-aliasing: multisampling, with this many samples a pixel.
 enum { ALBW_AA_OFF, ALBW_AA_2X, ALBW_AA_4X, ALBW_AA_8X, ALBW_AAS };
 
+// What touches the touch screen besides the mouse, which always does: a gamepad's touchpad, its
+// gyroscope (aimed after pressing the right stick in), or both.
+enum { ALBW_TOUCH_MOUSE, ALBW_TOUCH_TOUCHPAD, ALBW_TOUCH_GYRO, ALBW_TOUCH_BOTH, ALBW_TOUCHES };
+
 // The sharpening that follows an upscaler, in stops, as RCAS takes it: 0 is the most, each stop
 // halves it.
 #define ALBW_FSR_SHARPNESS_LEVELS 5
@@ -63,6 +67,7 @@ struct albw_settings {
     int integer_scale;
     int sound;
     int gamepads;
+    int touch_controls;       // ALBW_TOUCH_*
     int language;             // index into the launcher's list; 0 follows the system
 };
 
@@ -101,6 +106,14 @@ enum albw_launcher_action {
 // Called each frame while the launcher is up: ALBW_LAUNCHER_PLAY once a game that Play asked for
 // has been made.
 enum albw_launcher_action albw_launcher_poll(void);
+
+// The software keyboard's field (albw_kernel_set_text_prompt): asked from the game's thread,
+// answered from the window's, which shows it, hands it its events and draws it while it is up.
+int albw_prompt_ask(const uint16_t *text, unsigned n, unsigned max_len);
+int albw_prompt_answer(uint16_t *text, unsigned *n);
+int albw_prompt_visible(void);
+void albw_prompt_event(const SDL_Event *e);
+void albw_prompt_draw(void);
 
 int albw_launcher_visible(void);
 void albw_launcher_show(int settings_page);
