@@ -1,0 +1,52 @@
+# Maintainer: PaceTea <236469554+PaceTea@users.noreply.github.com>
+#
+# World Across's launcher, as released: it holds no part of the game. On its first start it asks
+# for a decrypted dump of a cartridge you own and makes the game from it, in
+# ~/.cache/albw-port/build, with the translator, Python and the C compiler it brings along.
+pkgname=world-across-bin
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="The Legend of Zelda: A Link Between Worlds (3DS), recompiled natively; makes the game from your own cartridge dump"
+arch=('x86_64')
+url="https://github.com/PaceTea/world-across"
+license=('MIT' 'Zlib' 'PSF-2.0' 'BSD-3-Clause' 'Apache-2.0' 'GPL-3.0-or-later' 'LGPL-3.0-or-later')
+depends=('glibc' 'gcc-libs' 'vulkan-icd-loader' 'hicolor-icon-theme')
+optdepends=('vulkan-driver: the graphics card draws the game (else the processor does)'
+            'wayland: a window on Wayland'
+            'libxkbcommon: the keyboard on Wayland'
+            'libdecor: window decorations on Wayland'
+            'libx11: a window on X11'
+            'libxcursor: the cursor on X11'
+            'libxi: input on X11'
+            'libxrandr: displays on X11'
+            'pipewire: sound through PipeWire'
+            'libpulse: sound through PulseAudio'
+            'alsa-lib: sound through ALSA')
+provides=('world-across')
+conflicts=('world-across')
+options=('!strip' '!debug' 'staticlibs')   # the kit's libgcc.a links the game
+_appimage="World-Across-$pkgver-x86_64.AppImage"
+source=("$_appimage::https://github.com/PaceTea/world-across/releases/download/v$pkgver/World-Across-x86_64.AppImage")
+noextract=("$_appimage")
+sha256sums=('6fc27dc46ee610333c3ab41c8f5fd1d43a729d2ebbd0720164d52e5215f84586')
+
+prepare() {
+    # The AppImage's own runtime unpacks it; no FUSE needed.
+    chmod +x "$_appimage"
+    rm -rf squashfs-root
+    "./$_appimage" --appimage-extract > /dev/null
+}
+
+package() {
+    cd squashfs-root
+    # The launcher finds its kit beside itself (../share/world-across/kit), wherever it is.
+    install -d "$pkgdir/opt/world-across"
+    cp -a usr "$pkgdir/opt/world-across/"
+    install -d "$pkgdir/usr/bin"
+    ln -s /opt/world-across/usr/bin/world-across "$pkgdir/usr/bin/world-across"
+    install -Dm644 world-across.desktop "$pkgdir/usr/share/applications/world-across.desktop"
+    install -Dm644 world-across.png "$pkgdir/usr/share/icons/hicolor/256x256/apps/world-across.png"
+    install -d "$pkgdir/usr/share/licenses/$pkgname"
+    ln -s /opt/world-across/usr/share/doc/world-across/LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+    ln -s /opt/world-across/usr/share/doc/world-across/licences "$pkgdir/usr/share/licenses/$pkgname/third-party"
+}
