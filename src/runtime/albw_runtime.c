@@ -20,11 +20,11 @@
 #include "albw_savedata.h"
 #include "albw_thread.h"
 
+#include "albw_platform.h"
+
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
-#include <sys/mman.h>
-#include <unistd.h>
 
 // Guest address space. Sparse and lazily committed, so reserving the whole range costs
 // nothing but makes every guest address a plain index.
@@ -156,12 +156,14 @@ static void make_dirs(const char *path) {
     char buf[600];
     snprintf(buf, sizeof buf, "%s", path);
     for (char *p = buf + 1; *p; p++) {
-        if (*p != '/') continue;
+        if (*p != '/' && *p != '\\') continue;
+        if (p[-1] == ':') continue;                      // a Windows drive's root
+        char sep = *p;
         *p = '\0';
-        mkdir(buf, 0755);
-        *p = '/';
+        albw_mkdir(buf);
+        *p = sep;
     }
-    mkdir(buf, 0755);
+    albw_mkdir(buf);
 }
 
 static void note_for_catch_up(uint32_t target) {
@@ -286,6 +288,12 @@ void albw_unimplemented(albw_cpu *c, uint32_t pc, const char *what) {
 // instruction's address is counted, and at exit the most frequent ones are written out as offsets
 // into the executable -- `addr2line -f -e build/albw-boot` turns them into functions and lines. There
 // is no perf on every machine, and this needs nothing but the binary's own debug information.
+// Linux only: it is built from signals, interval timers and the dynamic linker.
+#ifdef _WIN32
+static void profile_start(void) {
+    if (getenv("ALBW_PROFILE")) printf("[profile] not on Windows: ALBW_PROFILE is ignored\n");
+}
+#else
 #include <dlfcn.h>
 #include <signal.h>
 #include <sys/syscall.h>
@@ -368,6 +376,7 @@ static void profile_start(void) {
     struct itimerval every = { { 0, 1000 }, { 0, 1000 } };
     setitimer(ITIMER_PROF, &every, NULL);
 }
+#endif
 
 // ALBW_WAV=<file>: the DSP's output written to a WAV file as it is made, window or not -- the way to
 // hear what a headless run played, and to look at it. The header's sizes are filled in at exit.
@@ -440,10 +449,7 @@ static void make_dirs(const char *path);
 // game's code, rom-extract/code.bin, is looked for where the tools put it: under the current
 // directory, else beside the build directory this binary sits in.
 static void config_file(char *out, size_t n, const char *name) {
-    const char *xdg = getenv("XDG_CONFIG_HOME");
-    const char *home = getenv("HOME");
-    if (xdg && *xdg) snprintf(out, n, "%s/albw-port/%s", xdg, name);
-    else snprintf(out, n, "%s/.config/albw-port/%s", home ? home : ".", name);
+    albw_config_path(out, n, name);
 }
 
 static const char *remembered_card(void) {
@@ -460,7 +466,7 @@ static const char *remembered_card(void) {
 
 static void remember_card(const char *card) {
     char abs[1024], path[1100], dir[1100];
-    if (!realpath(card, abs)) return;
+    if (albw_realpath(card, abs, sizeof abs) != 0) return;
     const char *old = remembered_card();
     if (old && !strcmp(old, abs)) return;
     config_file(dir, sizeof dir, "");
@@ -520,20 +526,46 @@ static const char *default_code(void) {
     struct stat st;
     if (stat("rom-extract/code.bin", &st) == 0) return "rom-extract/code.bin";
     char exe[1024];
-    ssize_t n = readlink("/proc/self/exe", exe, sizeof exe - 1);
-    if (n > 0) {
-        exe[n] = '\0';
-        char *slash = strrchr(exe, '/');
-        if (slash) {
-            *slash = '\0';
-            snprintf(path, sizeof path, "%s/../rom-extract/code.bin", exe);
-            if (stat(path, &st) == 0) return path;
-        }
+    albw_exe_dir(exe, sizeof exe);
+    if (exe[0]) {
+        snprintf(path, sizeof path, "%s/../rom-extract/code.bin", exe);
+        if (stat(path, &st) == 0) return path;
+        // A Windows build sits in build/ itself, or anywhere with the folder beside it.
+        snprintf(path, sizeof path, "%s/rom-extract/code.bin", exe);
+        if (stat(path, &st) == 0) return path;
     }
     return "rom-extract/code.bin";
 }
 
+#ifdef ALBW_HAVE_WINDOW
+// The launcher's file dialog picked a card (albw_launcher_set_card_chooser): checked as one named
+// on the command line is, remembered, and given to the kernel for the game to read when it starts.
+static int choose_card(const char *path, char product[17], char *why, size_t n) {
+    static char chosen[1024];
+    if (!looks_like_card(path)) {
+        snprintf(why, n, "A card image is a file of 16 MB and more.");
+        return 0;
+    }
+    char prod[17];
+    card_product(path, prod);
+    if (!prod[0]) {
+        snprintf(why, n, "The file has no 3DS card header (a .3ds or .cci dump is what is needed).");
+        return 0;
+    }
+    if (&albw_build_product && albw_build_product[0] && strcmp(prod, albw_build_product)) {
+        snprintf(why, n, "That card is %s; this build is a translation of %s.", prod, albw_build_product);
+        return 0;
+    }
+    snprintf(chosen, sizeof chosen, "%s", path);
+    remember_card(chosen);
+    albw_kernel_set_rom(chosen);
+    memcpy(product, prod, 17);
+    return 1;
+}
+#endif
+
 int main(int argc, char **argv) {
+    albw_platform_init();
     // albw-boot [card.3ds], albw-boot code.bin [card.3ds], or ALBW_ROM for the card.
     const char *path = NULL, *card = getenv("ALBW_ROM");
     int card_named = 0;
@@ -560,10 +592,9 @@ int main(int argc, char **argv) {
     setvbuf(stdout, NULL, _IOLBF, 0);
 
     // The guest's memory and, after it, the shadow (albw_kernel.h); untouched pages cost nothing.
-    albw_mem = mmap(NULL, (size_t)ALBW_MEM_SIZE + ALBW_SHADOW_SIZE, PROT_READ | PROT_WRITE,
-                    MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
-    if (albw_mem == MAP_FAILED) {
-        perror("mmap");
+    albw_mem = albw_reserve((size_t)ALBW_MEM_SIZE + ALBW_SHADOW_SIZE);
+    if (!albw_mem) {
+        fprintf(stderr, "[init] cannot reserve the guest's memory\n");
         return 1;
     }
 
@@ -645,6 +676,7 @@ int main(int argc, char **argv) {
         card_product(card, prod);
         albw_launcher_set_card(prod);
     }
+    albw_launcher_set_card_chooser(choose_card);
     if (albw_window_open()) {
         if (!albw_window_launch()) {
             albw_window_close();

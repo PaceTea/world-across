@@ -1,4 +1,5 @@
 #include "albw_upscale.h"
+#include "albw_platform.h"
 #include "albw_raster.h"
 
 #include <math.h>
@@ -243,9 +244,9 @@ void albw_upscale_fsr1(const uint8_t *src, int src_w, int src_h, uint32_t *dst, 
     job.pw = src_w + 2 * BORDER;
     size_t plane = (size_t)job.pw * (size_t)(src_h + 2 * BORDER);
     if (plane > job.room) {
-        free(job.rgb);
+        albw_aligned_free(job.rgb);
         // Four floats of colour and four planes of one: eight floats a padded pixel.
-        job.rgb = aligned_alloc(16, plane * 8u * sizeof(float));
+        job.rgb = albw_aligned_alloc(16, plane * 8u * sizeof(float));
         if (!job.rgb) {
             job.room = 0;
             return;

@@ -93,6 +93,55 @@ gaps are.
 cmake -B build -G Ninja && ninja -C build
 ```
 
+### Windows
+
+The Windows program is built on Linux -- or under WSL2 on Windows itself -- with the MinGW-w64
+cross compiler, from the same translation (the extracting and translating steps above are the
+same):
+
+```bash
+cmake -B build-win -G Ninja -DCMAKE_TOOLCHAIN_FILE=cmake/mingw-w64-x86_64.cmake
+ninja -C build-win
+```
+
+That needs `mingw-w64-gcc` (Arch; `gcc-mingw-w64-x86-64-posix` and `g++-mingw-w64-x86-64-posix`
+on Debian and Ubuntu) and, for the window, SDL3's MinGW development files: unpack
+`SDL3-devel-<version>-mingw.tar.gz` from SDL's releases into `external/` (or point `SDL3_DIR` at
+its `x86_64-w64-mingw32/lib/cmake/SDL3`). Without them it is built headless. The result is
+`build-win/albw-boot.exe`, with `SDL3.dll` beside it; it needs Windows 10 or later and, for the GPU
+renderer, a Vulkan driver (every current AMD, NVIDIA and Intel driver has one).
+`tools/make_windows_package.sh` puts everything the Windows machine needs into one folder and one
+.zip (`build-win/World-Across-Windows.zip`, some 13 MB): the program without its debugging
+information, `SDL3.dll`, the card's `code.bin`, the licences and a short README. The card image is
+chosen in the launcher. Like the AppImage, the package holds the translated game: it is for your
+own machines only. Settings and saves go to
+`%APPDATA%\albw-port`, and the log of the last run, when it was not started from a console, to
+`%APPDATA%\albw-port\last-run.log`.
+
+The Windows build is checked the way the Linux one is, under Wine: `ALBW_WINE=1
+tools/frames_check.sh check` and `ALBW_WINE=1 tools/routes_check.sh check` play it against the same
+reference, and it has to come out byte for byte the same. FSR 3 and DLSS are not in the Windows
+build yet. Like everything built from your cartridge, it is yours alone.
+
+### An AppImage of your own build
+
+```bash
+tools/make_appimage.sh
+```
+
+packs the build into one file, `build/World_Across-x86_64.AppImage`, with SDL3 inside it (many
+distributions do not have it yet), an icon and a menu entry. It needs `squashfs-tools` and
+AppImage's own runtime, `runtime-x86_64` from
+[AppImage/type2-runtime](https://github.com/AppImage/type2-runtime/releases), at
+`build/appimage/runtime-x86_64` (or named by `APPIMAGE_RUNTIME`); the script downloads nothing.
+The AppImage runs where the build would: on your distribution, and on any with a C library at
+least as new. Started from a menu the first time, the launcher asks for your card image and
+remembers it.
+
+It holds the translated game and the card's code, so it is yours alone: keep it on your own
+machines and do not share it. There is no AppImage to download for the same reason -- each one can
+only be made from a cartridge its owner has.
+
 ## Running
 
 ```bash
@@ -102,7 +151,9 @@ cmake -B build -G Ninja && ninja -C build
 The card image is needed at runtime as well as at extraction time, because the game reads its
 RomFS through the filesystem service rather than from anything baked into the build. Its path is
 remembered (in `~/.config/albw-port/card`), so after the first start `./build/albw-boot` alone is
-enough, from any directory. `ALBW_ROM=/path/to/your.3ds` names it too, which is how the tools do it.
+enough, from any directory. Started with no card known, the launcher's first item is Choose card,
+which asks for it in the desktop's file dialog. `ALBW_ROM=/path/to/your.3ds` names it too, which is
+how the tools do it.
 
 It will run until it hits something unimplemented and say what that was. Useful knobs:
 
@@ -404,8 +455,9 @@ few functions of Microsoft's C library it calls. The upscaler runs on a Vulkan d
 read back from the GPU renderer and the upscaled picture comes back, on a thread of its own.
 
 NVIDIA DLSS is built from NVIDIA's DLSS SDK, which is under NVIDIA's own licence (the NVIDIA RTX
-SDKs License: NVIDIA graphics cards only, NVIDIA credited where the program says who made it --
-the launcher does -- and NVIDIA told before any commercial release). Whoever fetches it accepts
+SDKs License: NVIDIA graphics cards only, the SDK named where the program shows such things --
+the launcher's first page does, in a build that has it -- and NVIDIA told before any commercial
+release). Whoever fetches it accepts
 that licence; nothing of it is committed. The parts the build uses, about 60 MB:
 
 ```bash

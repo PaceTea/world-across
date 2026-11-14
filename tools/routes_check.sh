@@ -34,6 +34,17 @@ if [ -z "${ALBW_ROM:-}" ]; then
     exit 2
 fi
 
+# ALBW_WINE=1 runs the Windows build (build-win/albw-boot.exe, see the README) under Wine instead,
+# against the same reference: the two have to play the same game. Wine's own WINEPREFIX applies.
+if [ -n "${ALBW_WINE:-}" ]; then
+    boot=(wine "$root/build-win/albw-boot.exe")
+    winpath() { printf 'Z:%s' "$(realpath -m "$1")"; }
+    export WINEDEBUG=${WINEDEBUG:--all} WINEDLLOVERRIDES=${WINEDLLOVERRIDES:-mscoree,mshtml=}
+else
+    boot=("$root/build/albw-boot")
+    winpath() { printf '%s' "$1"; }
+fi
+
 rm -rf -- "$new"
 mkdir -p "$new"
 
@@ -41,10 +52,11 @@ mkdir -p "$new"
 route() {
     local name=$1 press=$2 from=$3 first=$4 every=$5 last=$6 save=$7
     mkdir -p "$new/$name"
-    env ALBW_HEADLESS=1 ALBW_SAVE_DIR="$save" ALBW_PRESS="$(cat "$root/tools/routes/$press")" \
+    env ALBW_ROM="$(winpath "$ALBW_ROM")" ALBW_HEADLESS=1 ALBW_SAVE_DIR="$(winpath "$save")" \
+        ALBW_PRESS="$(cat "$root/tools/routes/$press")" \
         ALBW_RENDER=$((last - from + 1)) ALBW_RENDER_FROM="$from" \
-        ALBW_DUMP_FRAMES="$new/$name" ALBW_DUMP_FROM="$first" ALBW_DUMP_EVERY="$every" \
-        ALBW_STOP_AT=$((last + 1)) timeout 1500 "$root/build/albw-boot" > "$new/$name/run.log" 2>&1
+        ALBW_DUMP_FRAMES="$(winpath "$new/$name")" ALBW_DUMP_FROM="$first" ALBW_DUMP_EVERY="$every" \
+        ALBW_STOP_AT=$((last + 1)) timeout 1500 "${boot[@]}" > "$new/$name/run.log" 2>&1
     if [ -s "$save/missing_entries.txt" ]; then
         echo "routes_check: the $name route ran into untranslated code at" \
              "$(tr '\n' ' ' < "$save/missing_entries.txt"); see $new/$name/run.log" >&2

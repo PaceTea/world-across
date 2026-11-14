@@ -9,12 +9,10 @@
 // filesystem much later on.
 #include "albw_romfs.h"
 
-#include <fcntl.h>
+#include "albw_platform.h"
+
 #include <stdio.h>
 #include <string.h>
-#include <sys/mman.h>
-#include <sys/stat.h>
-#include <unistd.h>
 
 #define MEDIA_UNIT 0x200u
 
@@ -43,25 +41,18 @@ int albw_romfs_open(const char *rom_path) {
         return 0;
     }
 
-    int fd = open(rom_path, O_RDONLY);
-    if (fd < 0) {
-        perror(rom_path);
+    uint64_t size = 0;
+    const uint8_t *map = albw_map_file(rom_path, &size);
+    if (!map) {
+        fprintf(stderr, "[romfs] cannot map the card image %s\n", rom_path);
         return 0;
     }
-    struct stat st;
-    if (fstat(fd, &st) < 0 || st.st_size < 0x8000) {
+    if (size < 0x8000) {
         fprintf(stderr, "[romfs] %s is too small to be a card image\n", rom_path);
-        close(fd);
         return 0;
     }
-    rom_len = (size_t)st.st_size;
-    rom_map = mmap(NULL, rom_len, PROT_READ, MAP_PRIVATE, fd, 0);
-    close(fd);
-    if (rom_map == MAP_FAILED) {
-        perror("mmap");
-        rom_map = NULL;
-        return 0;
-    }
+    rom_len = (size_t)size;
+    rom_map = map;
 
     if (memcmp(rom_map + 0x100, "NCSD", 4)) {
         fprintf(stderr, "[romfs] %s does not start with an NCSD header\n", rom_path);

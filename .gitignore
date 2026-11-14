@@ -23,6 +23,8 @@ src/generated/
 *.rep/
 
 build/
+# Other build directories (build-win/ for Windows): they hold the translated game as much as build/.
+build-*/
 
 # Python byte code
 __pycache__/

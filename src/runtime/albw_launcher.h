@@ -78,6 +78,12 @@ int albw_launcher_init(SDL_Window *window, SDL_Renderer *renderer);
 // The card the game is running from, for the line that says it is ready: its product code.
 void albw_launcher_set_card(const char *product);
 
+// With no card known, Play asks for one in a file dialog and hands the path to `chooser`, which
+// checks it, remembers it and gives the game its RomFS: it returns 1 and the product code, or 0
+// and why not. Set by main() before the window opens.
+void albw_launcher_set_card_chooser(int (*chooser)(const char *path, char product[17], char *why,
+                                                   size_t n));
+
 enum albw_launcher_action {
     ALBW_LAUNCHER_NONE,       // nothing for the window to do
     ALBW_LAUNCHER_PLAY,       // close the menu, give the game its controls

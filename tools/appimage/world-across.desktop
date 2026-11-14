@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=World Across
+Comment=A Link Between Worlds, recompiled for Linux (your own build)
+Exec=albw-boot
+Icon=world-across
+Terminal=false
+Categories=Game;

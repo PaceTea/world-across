@@ -27,12 +27,39 @@ add_executable(albw-boot
     src/runtime/albw_raster.c
     src/runtime/albw_shader.c
     src/runtime/albw_thread.c
+    src/runtime/albw_platform.c
     ${ALBW_GENERATED}
 )
 target_include_directories(albw-boot PRIVATE src/runtime src/generated)
 target_compile_options(albw-boot PRIVATE -O1 -g -fno-strict-aliasing -Wall
     -Wno-unused-but-set-variable -Wno-unused-variable)
 target_link_libraries(albw-boot PRIVATE m)
+
+# Windows (MinGW-w64, natively in MSYS2 or across from Linux with cmake/mingw-w64-x86_64.cmake):
+# Windows 10's API (WaitOnAddress), C99's printf, the C and C++ runtimes linked in so that the
+# program needs no DLL but SDL's, and a manifest that makes paths UTF-8 as on Linux.
+if(WIN32)
+    enable_language(RC)
+    target_compile_definitions(albw-boot PRIVATE _WIN32_WINNT=0x0A00 __USE_MINGW_ANSI_STDIO=1)
+    target_sources(albw-boot PRIVATE src/windows/albw-boot.rc)
+    target_link_libraries(albw-boot PRIVATE synchronization)
+    target_link_options(albw-boot PRIVATE -static -static-libgcc -static-libstdc++)
+    # stb is headers alone: a cross build takes the host's, copied where only they are found.
+    if(CMAKE_CROSSCOMPILING AND EXISTS /usr/include/stb/stb_truetype.h)
+        file(COPY /usr/include/stb/stb_truetype.h /usr/include/stb/stb_image.h
+             DESTINATION ${CMAKE_BINARY_DIR}/host-include/stb)
+        target_include_directories(albw-boot SYSTEM PRIVATE ${CMAKE_BINARY_DIR}/host-include)
+    endif()
+    # SDL3's MinGW development files, unpacked into external/, unless SDL3_DIR says where.
+    # (A failed search leaves SDL3_DIR-NOTFOUND in the cache, which a later unpacking replaces.)
+    if(NOT SDL3_DIR)
+        file(GLOB ALBW_SDL3_MINGW "${CMAKE_SOURCE_DIR}/external/SDL3-*/x86_64-w64-mingw32/lib/cmake/SDL3")
+        if(ALBW_SDL3_MINGW)
+            list(GET ALBW_SDL3_MINGW -1 ALBW_SDL3_MINGW)
+            set(SDL3_DIR "${ALBW_SDL3_MINGW}" CACHE PATH "SDL3's CMake files for MinGW" FORCE)
+        endif()
+    endif()
+endif()
 
 # The renderer runs per pixel and the shader per vertex, so they are worth the optimiser the
 # generated code is not; -O2 rather than anything tuned to this machine, so the build still runs on
@@ -114,7 +141,9 @@ if(SDL3_FOUND)
     # Windows-only shader compiler.
     set(ALBW_FFX_SDK "${CMAKE_SOURCE_DIR}/external/fidelityfx-sdk-v1.1.4/sdk"
         CACHE PATH "The sdk/ folder of AMD's FidelityFX SDK 1.1.4")
-    find_package(Vulkan QUIET)
+    if(NOT WIN32)
+        find_package(Vulkan QUIET)
+    endif()
     find_package(Python3 COMPONENTS Interpreter QUIET)
     if(GLSLC AND Vulkan_FOUND AND Python3_FOUND
             AND EXISTS "${ALBW_FFX_SDK}/include/FidelityFX/host/ffx_fsr3upscaler.h")
@@ -218,11 +247,22 @@ if(SDL3_FOUND)
     else()
         message(STATUS "DLSS SDK not in external/: no DLSS")
     endif()
+    if(WIN32)
+        # A program with a window, not a console's: started from a terminal it still writes there,
+        # and otherwise into last-run.log beside its settings (albw_platform_init).
+        target_link_options(albw-boot PRIVATE -mwindows)
+        add_custom_command(TARGET albw-boot POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:SDL3::SDL3>
+                    $<TARGET_FILE_DIR:albw-boot>
+            COMMENT "SDL3.dll beside albw-boot.exe")
+    endif()
     message(STATUS "SDL3 found: albw-boot opens a window")
 else()
     message(STATUS "SDL3 not found: albw-boot is headless")
 endif()
 
+# The diagnostic builds and the kernel library for the Unicorn reference run are Linux tools.
+if(NOT WIN32)
 # Same sources with per-instruction tracing, for diffing against the Unicorn reference.
 add_executable(albw-boot-trace
     src/runtime/albw_runtime.c
@@ -237,6 +277,7 @@ add_executable(albw-boot-trace
     src/runtime/albw_raster.c
     src/runtime/albw_shader.c
     src/runtime/albw_thread.c
+    src/runtime/albw_platform.c
     ${ALBW_GENERATED}
 )
 target_include_directories(albw-boot-trace PRIVATE src/runtime src/generated)
@@ -260,6 +301,7 @@ add_executable(albw-boot-writes
     src/runtime/albw_raster.c
     src/runtime/albw_shader.c
     src/runtime/albw_thread.c
+    src/runtime/albw_platform.c
     ${ALBW_GENERATED}
 )
 target_include_directories(albw-boot-writes PRIVATE src/runtime src/generated)
@@ -283,6 +325,7 @@ add_executable(albw-boot-nan
     src/runtime/albw_raster.c
     src/runtime/albw_shader.c
     src/runtime/albw_thread.c
+    src/runtime/albw_platform.c
     ${ALBW_GENERATED}
 )
 target_include_directories(albw-boot-nan PRIVATE src/runtime src/generated)
@@ -307,6 +350,7 @@ add_library(albw-kernel SHARED
     src/runtime/albw_raster.c
     src/runtime/albw_shader.c
     src/runtime/albw_thread.c
+    src/runtime/albw_platform.c
     src/runtime/albw_kernel_shim.c
 )
 target_include_directories(albw-kernel PRIVATE src/runtime)
@@ -317,8 +361,12 @@ target_compile_options(albw-kernel PRIVATE -O1 -g -fno-strict-aliasing -Wall)
 target_link_options(albw-kernel PRIVATE -Wl,--no-undefined)
 target_link_libraries(albw-kernel PRIVATE m)
 
+endif()
+
 # The rasteriser draws with a pool of threads.
 find_package(Threads REQUIRED)
 foreach(target albw-boot albw-boot-trace albw-boot-writes albw-boot-nan albw-kernel)
-    target_link_libraries(${target} PRIVATE Threads::Threads)
+    if(TARGET ${target})
+        target_link_libraries(${target} PRIVATE Threads::Threads)
+    endif()
 endforeach()

@@ -23,13 +23,25 @@ if [ -z "${ALBW_ROM:-}" ]; then
     exit 2
 fi
 
+# ALBW_WINE=1 runs the Windows build (build-win/albw-boot.exe, see the README) under Wine instead,
+# against the same reference: the two have to play the same game. Wine's own WINEPREFIX applies.
+if [ -n "${ALBW_WINE:-}" ]; then
+    boot=(wine "$root/build-win/albw-boot.exe")
+    winpath() { printf 'Z:%s' "$(realpath -m "$1")"; }
+    export WINEDEBUG=${WINEDEBUG:--all} WINEDLLOVERRIDES=${WINEDLLOVERRIDES:-mscoree,mshtml=}
+else
+    boot=("$root/build/albw-boot")
+    winpath() { printf '%s' "$1"; }
+fi
+
 save=$(mktemp -d "${TMPDIR:-/tmp}/albw-frames.XXXXXX") || exit 2
 trap 'rm -rf -- "$save"' EXIT
 rm -rf -- "$new"
 mkdir -p "$new"
-env ALBW_HEADLESS=1 ALBW_SAVE_DIR="$save" ALBW_RENDER=101 ALBW_RENDER_FROM=1000 ALBW_STOP_AT=1101 \
-    ALBW_DUMP_FRAMES="$new" ALBW_DUMP_FROM=1050 ALBW_DUMP_EVERY=50 \
-    timeout 900 "$root/build/albw-boot" > "$new/run.log" 2>&1
+env ALBW_ROM="$(winpath "$ALBW_ROM")" ALBW_HEADLESS=1 ALBW_SAVE_DIR="$(winpath "$save")" \
+    ALBW_RENDER=101 ALBW_RENDER_FROM=1000 ALBW_STOP_AT=1101 \
+    ALBW_DUMP_FRAMES="$(winpath "$new")" ALBW_DUMP_FROM=1050 ALBW_DUMP_EVERY=50 \
+    timeout 900 "${boot[@]}" > "$new/run.log" 2>&1
 
 frames="frame-001050-top frame-001050-bottom frame-001100-top frame-001100-bottom"
 for f in $frames; do

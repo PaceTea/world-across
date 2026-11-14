@@ -4,9 +4,15 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/mman.h>
 #include <time.h>
+#ifdef _WIN32
+// On Windows the host stacks are fibers: the system's own form of a stack to switch to, and the
+// one its debuggers and exception handling understand.
+#include <windows.h>
+#else
+#include <sys/mman.h>
 #include <ucontext.h>
+#endif
 
 // Host stack per guest thread, for the ucontext driver. Generous because guest call depth
 // becomes C call depth, and lazily committed, so the reservation costs nothing until a thread
@@ -24,8 +30,12 @@ typedef struct {
     uint32_t entry;
     uint32_t resume_pc;
     albw_cpu cpu;
+#ifdef _WIN32
+    void *fiber;            // only the port's driver uses this and `prepared`
+#else
     ucontext_t ctx;         // only the ucontext driver uses these two
     void *stack;
+#endif
     int prepared;
     int detached;           // no handle to it is left: its slot is free once it has finished
 } albw_thread;
@@ -77,9 +87,16 @@ int albw_thread_create(uint32_t entry, uint32_t arg, uint32_t stack_top, int32_t
     for (int i = 0; i < ALBW_MAX_THREADS; i++) {
         if (threads[i].state != ALBW_T_FREE) continue;
         albw_thread *t = &threads[i];
+#ifdef _WIN32
+        // A finished thread's fiber goes once the slot is taken again; this runs on the
+        // scheduler's, never on the one being deleted.
+        if (t->fiber) DeleteFiber(t->fiber);
+        memset(t, 0, sizeof *t);
+#else
         void *keep_stack = t->stack;                    // host stacks are reused
         memset(t, 0, sizeof *t);
         t->stack = keep_stack;
+#endif
         t->state = ALBW_T_READY;
         t->priority = priority;
         t->entry = entry;
@@ -248,17 +265,54 @@ void albw_thread_report_blocked(void) {
 
 // ----------------------------------------- the port's driver: host stacks -----
 
-static ucontext_t scheduler_ctx;
-static int scheduler_ready;
-
 // Guest threads return here when their entry function returns, which Horizon treats as
 // svcExitThread.
-static void thread_trampoline(int id) {
+static void thread_body(int id) {
     albw_dispatch(&threads[id].cpu, threads[id].entry);
     // A thread whose function returns ends as one that calls ExitThread, so that the kernel can
     // signal its handle.
     albw_svc(&threads[id].cpu, 0x09);
     albw_thread_exit();
+}
+
+#ifdef _WIN32
+static void *scheduler_fiber;
+static int scheduler_ready;
+
+static VOID CALLBACK fiber_start(LPVOID param) {
+    thread_body((int)(intptr_t)param);
+    // A fiber's function must never return -- that would end the whole thread -- and a finished
+    // thread is never scheduled again, so this is only a safeguard.
+    for (;;) SwitchToFiber(scheduler_fiber);
+}
+
+static void fiber_prepare(int id) {
+    albw_thread *t = &threads[id];
+    t->fiber = CreateFiberEx(0, ALBW_HOST_STACK, 0, fiber_start, (LPVOID)(intptr_t)id);
+    if (!t->fiber) {
+        fprintf(stderr, "[thread] CreateFiberEx failed (%lu)\n", (unsigned long)GetLastError());
+        t->state = ALBW_T_FREE;
+        return;
+    }
+    t->prepared = 1;
+}
+
+static void fiber_reschedule(void) {
+    if (!scheduler_ready) {
+        fprintf(stderr, "[thread] a guest thread tried to switch with no scheduler "
+                        "running; this build drives execution some other way\n");
+        abort();
+    }
+    SwitchToFiber(scheduler_fiber);
+}
+
+static const albw_thread_driver port_driver = { fiber_reschedule };
+#else
+static ucontext_t scheduler_ctx;
+static int scheduler_ready;
+
+static void thread_trampoline(int id) {
+    thread_body(id);
 }
 
 static void ucontext_prepare(int id) {
@@ -290,13 +344,19 @@ static void ucontext_reschedule(void) {
     swapcontext(&threads[current].ctx, &scheduler_ctx);
 }
 
-static const albw_thread_driver ucontext_driver = { ucontext_reschedule };
+static const albw_thread_driver port_driver = { ucontext_reschedule };
+#endif
 
 const char *albw_thread_run(uint32_t entry) {
-    albw_thread_set_driver(&ucontext_driver);
+    albw_thread_set_driver(&port_driver);
 
     int main_id = albw_thread_create(entry, 0, ALBW_MAIN_STACK_TOP, 0x30);
     if (main_id < 0) return "could not create the main thread";
+#ifdef _WIN32
+    // The thread that schedules becomes a fiber itself, to switch from and back to.
+    scheduler_fiber = ConvertThreadToFiber(NULL);
+    if (!scheduler_fiber) return "could not make the scheduling thread a fiber";
+#endif
     scheduler_ready = 1;
 
     for (;;) {
@@ -305,15 +365,25 @@ const char *albw_thread_run(uint32_t entry) {
         // Prepared on first run, not at creation: rewinding a context would throw away the
         // stack of a thread that is only suspended.
         if (!threads[next].prepared) {
+#ifdef _WIN32
+            fiber_prepare(next);
+#else
             ucontext_prepare(next);
+#endif
             if (threads[next].state == ALBW_T_FREE) return "could not start a thread";
         }
         current = next;
         uint64_t t0 = clock_ns();
+#ifdef _WIN32
+        SwitchToFiber(threads[next].fiber);
+#else
         swapcontext(&scheduler_ctx, &threads[next].ctx);
+#endif
         ran_ns[current] += clock_ns() - t0;
+#ifndef _WIN32
         if (threads[current].state == ALBW_T_READY && threads[current].ctx.uc_link == NULL) {
             threads[current].state = ALBW_T_FINISHED;
         }
+#endif
     }
 }

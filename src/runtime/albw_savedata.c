@@ -1,4 +1,5 @@
 #include "albw_savedata.h"
+#include "albw_platform.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -8,7 +9,6 @@
 #include <dirent.h>
 #include <sys/stat.h>
 #include <time.h>
-#include <unistd.h>
 
 static char root[512];
 
@@ -20,13 +20,7 @@ const char *albw_save_root(void) {
         snprintf(root, sizeof root, "%s", explicit_dir);
         return root;
     }
-    const char *xdg = getenv("XDG_DATA_HOME");
-    if (xdg && *xdg) {
-        snprintf(root, sizeof root, "%s/albw-port", xdg);
-        return root;
-    }
-    const char *home = getenv("HOME");
-    snprintf(root, sizeof root, "%s/.local/share/albw-port", home ? home : ".");
+    albw_data_root(root, sizeof root);
     return root;
 }
 
@@ -35,12 +29,14 @@ static int make_path(const char *path) {
     char buf[600];
     snprintf(buf, sizeof buf, "%s", path);
     for (char *p = buf + 1; *p; p++) {
-        if (*p != '/') continue;
+        if (*p != '/' && *p != '\\') continue;
+        if (p[-1] == ':') continue;                      // a Windows drive's root
+        char sep = *p;
         *p = '\0';
-        if (mkdir(buf, 0755) < 0 && errno != EEXIST) return 0;
-        *p = '/';
+        if (albw_mkdir(buf) < 0) return 0;
+        *p = sep;
     }
-    return mkdir(buf, 0755) == 0 || errno == EEXIST;
+    return albw_mkdir(buf) == 0;
 }
 
 // The guest's path becomes one file name inside the archive's directory. Separators are
@@ -103,18 +99,14 @@ static void marker_path(uint32_t archive_id, char *out, size_t n) {
 }
 
 static void sync_dir(const char *dir) {
-    int fd = open(dir, O_RDONLY | O_DIRECTORY);
-    if (fd >= 0) {
-        fsync(fd);
-        close(fd);
-    }
+    albw_fsync_dir(dir);
 }
 
 // A copy of a file, on disk before this returns.
 static int copy_file(const char *from, const char *to) {
-    int in = open(from, O_RDONLY);
+    int in = albw_open(from, O_RDONLY, 0644);
     if (in < 0) return 0;
-    int out = open(to, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    int out = albw_open(to, O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (out < 0) {
         close(in);
         return 0;
@@ -129,7 +121,7 @@ static int copy_file(const char *from, const char *to) {
         }
     }
     if (n < 0) ok = 0;
-    if (fsync(out) < 0) ok = 0;
+    if (albw_fsync(out) < 0) ok = 0;
     close(in);
     close(out);
     return ok;
@@ -154,7 +146,7 @@ static int apply_pending(uint32_t archive_id) {
         char from[900], to[900];
         snprintf(from, sizeof from, "%s/%s", pend, e->d_name);
         snprintf(to, sizeof to, "%s/%s", dir, e->d_name);
-        if (rename(from, to) < 0) {
+        if (albw_rename(from, to) < 0) {
             printf("[save ] cannot move %s into the save: %s\n", from, strerror(errno));
             ok = 0;
         }
@@ -218,7 +210,7 @@ void albw_save_closed(int fd) {
 
 // Puts `path`, opened with `flags`, under the descriptor fd.
 static int reopen_as(int fd, const char *path, int flags) {
-    int nfd = open(path, flags);
+    int nfd = albw_open(path, flags, 0644);
     if (nfd < 0) return 0;
     int ok = dup2(nfd, fd) >= 0;
     close(nfd);
@@ -258,20 +250,20 @@ int albw_save_commit(uint32_t archive_id) {
         if (skip_entry(e)) continue;
         char path[900];
         snprintf(path, sizeof path, "%s/%s", pend, e->d_name);
-        int fd = open(path, O_RDONLY);
+        int fd = albw_open(path, O_RDONLY, 0644);
         if (fd >= 0) {
-            fsync(fd);
+            albw_fsync(fd);
             close(fd);
         }
     }
     closedir(d);
     sync_dir(pend);
-    int m = open(marker, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    int m = albw_open(marker, O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (m < 0) {
         printf("[save ] cannot commit archive %u: %s\n", archive_id, strerror(errno));
         return 0;
     }
-    fsync(m);
+    albw_fsync(m);
     close(m);
     sync_dir(albw_save_root());
     if (!apply_pending(archive_id)) return 0;            // the marker stays: the next start retries
@@ -321,13 +313,13 @@ int albw_save_open(uint32_t archive_id, const char *guest_path, int create) {
         // albw_save_before_write moves it onto a copy. Neither: made, as a change, when asked to.
         int fd, pending;
         if (access(copy, F_OK) == 0) {
-            fd = open(copy, O_RDWR);
+            fd = albw_open(copy, O_RDWR, 0644);
             pending = 1;
         } else if (access(full, F_OK) == 0) {
-            fd = open(full, O_RDONLY);
+            fd = albw_open(full, O_RDONLY, 0644);
             pending = 0;
         } else if (create) {
-            fd = make_path(pend) ? open(copy, O_RDWR | O_CREAT, 0644) : -1;
+            fd = make_path(pend) ? albw_open(copy, O_RDWR | O_CREAT, 0644) : -1;
             pending = 1;
         } else {
             printf("[save ] %s: %s\n", full, strerror(ENOENT));
@@ -342,8 +334,8 @@ int albw_save_open(uint32_t archive_id, const char *guest_path, int create) {
                pending ? " (a change, until the game commits it)" : "");
         return fd;
     }
-    int fd = open(full, create ? (O_RDWR | O_CREAT) : O_RDWR, 0644);
-    if (fd < 0 && !create) fd = open(full, O_RDONLY);
+    int fd = albw_open(full, create ? (O_RDWR | O_CREAT) : O_RDWR, 0644);
+    if (fd < 0 && !create) fd = albw_open(full, O_RDONLY, 0644);
     if (fd < 0) {
         printf("[save ] %s: %s\n", full, strerror(errno));
         return -1;
@@ -400,7 +392,7 @@ int albw_save_format(uint32_t archive_id, const struct albw_save_format *format)
             if (!aside[0]) {
                 time_t now = time(NULL);
                 struct tm tm;
-                localtime_r(&now, &tm);
+                albw_localtime(&now, &tm);
                 snprintf(aside, sizeof aside, "%s/archive-%u.before-format-%04d%02d%02d-%02d%02d%02d",
                          albw_save_root(), archive_id, tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
                          tm.tm_hour, tm.tm_min, tm.tm_sec);
@@ -415,7 +407,7 @@ int albw_save_format(uint32_t archive_id, const struct albw_save_format *format)
             char from[900], to[900];
             snprintf(from, sizeof from, "%s/%s", dir, e->d_name);
             snprintf(to, sizeof to, "%s/%s", aside, e->d_name);
-            if (rename(from, to) < 0) {
+            if (albw_rename(from, to) < 0) {
                 printf("[save ] cannot move %s aside: %s; not formatting\n", from, strerror(errno));
                 closedir(d);
                 return 0;

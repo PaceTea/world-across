@@ -759,14 +759,14 @@ static void pace_note(uint64_t work_start, uint64_t now) {
     double seconds = (double)(now - pace_since_ns) * 1e-9;
     double fps = seconds > 0 ? pace_frames / seconds : 0;
     double busy = (double)pace_work_ns * 1e-6 / pace_frames, worst = (double)pace_worst_ns * 1e-6;
+    static const char name[] = "World Across - ";
     char title[96];
-    snprintf(title, sizeof title, "World Across - %.1f fps, %.1f ms a frame (worst %.1f)", fps, busy,
-             worst);
+    snprintf(title, sizeof title, "%s%.1f fps, %.1f ms a frame (worst %.1f)", name, fps, busy, worst);
     pthread_mutex_lock(&win_mutex);
     snprintf(pub_title, sizeof pub_title, "%s", title);
     pub_title_new = 1;
     pthread_mutex_unlock(&win_mutex);
-    if (env_on("ALBW_FPS")) printf("[window] %s\n", title + 12);
+    if (env_on("ALBW_FPS")) printf("[window] %s\n", title + sizeof name - 1);
     pace_since_ns = now;
     pace_work_ns = pace_worst_ns = 0;
     pace_frames = 0;

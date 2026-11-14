@@ -1,0 +1,5 @@
+// The Windows program's resources: its manifest (UTF-8 paths, per-monitor DPI, Windows 10 and
+// later) and its icon.
+#include <winuser.h>
+CREATEPROCESS_MANIFEST_RESOURCE_ID RT_MANIFEST "albw-boot.manifest"
+1 ICON "world-across.ico"

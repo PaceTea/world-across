@@ -28,10 +28,11 @@
 #include "albw_window.h"
 #endif
 
-#include <fcntl.h>
-#include <ucontext.h>
-#include <unistd.h>
+#include "albw_platform.h"
 #include "albw_thread.h"
+#ifndef _WIN32
+#include <ucontext.h>                                    // ALBW_WATCH_VRAM's fault address
+#endif
 
 #include <signal.h>
 #include <stdio.h>
@@ -1043,7 +1044,7 @@ static void ipc_dispatch(albw_cpu *c, uint32_t session) {
             int fi = handle_index(fh);
             uint64_t want = (uint64_t)albw_r32(ALBW_CMDBUF + 28)
                           | ((uint64_t)albw_r32(ALBW_CMDBUF + 32) << 32);
-            if (fi >= 0 && want && ftruncate(handles[fi].fd, (off_t)want) == 0) {
+            if (fi >= 0 && want && albw_ftruncate(handles[fi].fd, want) == 0) {
                 handles[fi].size = want;
             }
             // CreateFile hands back no handle, so the file it just made is closed again.
@@ -1209,7 +1210,7 @@ static void ipc_dispatch(albw_cpu *c, uint32_t session) {
                     return;
                 }
                 if (handles[idx].fd > 0) {
-                    ssize_t r = pread(handles[idx].fd, albw_mem + dest, want, (off_t)offset);
+                    albw_ssize r = albw_pread(handles[idx].fd, albw_mem + dest, want, offset);
                     got = r > 0 ? (uint32_t)r : 0;
                 } else if (offset < size) {
                     uint64_t left = size - offset;
@@ -1259,8 +1260,8 @@ static void ipc_dispatch(albw_cpu *c, uint32_t session) {
                 uint32_t src = albw_r32(ALBW_CMDBUF + 24);
                 uint32_t wrote = 0;
                 if (handles[idx].fd > 0 && albw_guest_ok(src, want)) {
-                    ssize_t r = albw_save_before_write(handles[idx].fd)
-                              ? pwrite(handles[idx].fd, albw_mem + src, want, (off_t)offset) : -1;
+                    albw_ssize r = albw_save_before_write(handles[idx].fd)
+                              ? albw_pwrite(handles[idx].fd, albw_mem + src, want, offset) : -1;
                     if (r > 0) wrote = (uint32_t)r;
                 } else if (handles[idx].fd <= 0) {
                     // The card image is read-only, and pretending otherwise would lose data
@@ -1281,7 +1282,7 @@ static void ipc_dispatch(albw_cpu *c, uint32_t session) {
                 uint64_t size = (uint64_t)albw_r32(ALBW_CMDBUF + 4)
                               | ((uint64_t)albw_r32(ALBW_CMDBUF + 8) << 32);
                 if (handles[idx].fd > 0 && albw_save_before_write(handles[idx].fd)
-                        && ftruncate(handles[idx].fd, (off_t)size) == 0) {
+                        && albw_ftruncate(handles[idx].fd, size) == 0) {
                     handles[idx].size = size;
                 }
                 ipc_reply(c, command_id, 0);
@@ -2541,6 +2542,8 @@ static const char *svc_name(uint32_t imm) {
 // place that touches it anyway is reported once -- the question being whether the game ever reads
 // what the GPU drew with the processor, which decides whether a renderer may leave VRAM undrawn.
 // Kernel code (the svc handlers) has it open; a fault outside a handler opens it until the next.
+// Linux only: it is made of mprotect and a SIGSEGV handler.
+#ifndef _WIN32
 #include <sys/mman.h>
 #define VRAM_FROM 0x1F000000u
 #define VRAM_SIZE 0x00600000u
@@ -2576,9 +2579,14 @@ static void vram_open(void) {
     mprotect(albw_mem + VRAM_FROM, VRAM_SIZE, PROT_READ | PROT_WRITE);
 }
 
+#endif
+
 static void svc_body(albw_cpu *c, uint32_t imm);
 
 void albw_svc(albw_cpu *c, uint32_t imm) {
+#ifdef _WIN32
+    svc_body(c, imm);
+#else
     if (vram_watch < 0) {
         const char *e = albw_env("ALBW_WATCH_VRAM");
         vram_watch = e && *e && *e != '0';
@@ -2594,6 +2602,7 @@ void albw_svc(albw_cpu *c, uint32_t imm) {
     if (vram_watch) vram_open();
     svc_body(c, imm);
     if (vram_watch) vram_close();
+#endif
 }
 
 static void svc_body(albw_cpu *c, uint32_t imm) {

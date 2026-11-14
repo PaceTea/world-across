@@ -1,4 +1,5 @@
 #include "albw_launcher.h"
+#include "albw_platform.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -63,26 +64,23 @@ static int key_index(const char *const *keys, int count, const char *v, int othe
 }
 
 static void settings_path(char *out, size_t n) {
-    const char *xdg = getenv("XDG_CONFIG_HOME"), *home = getenv("HOME");
-    if (xdg && *xdg) snprintf(out, n, "%s/albw-port/settings", xdg);
-    else snprintf(out, n, "%s/.config/albw-port/settings", home ? home : ".");
+    albw_config_path(out, n, "settings");
 }
 
 static void settings_save(void) {
     char path[600], dir[600];
     settings_path(path, sizeof path);
-    snprintf(dir, sizeof dir, "%s", path);
+    // The directory, and the one it is in (~/.config, or %APPDATA%), may not be there yet.
+    albw_config_path(dir, sizeof dir, "");
+    size_t len = strlen(dir);
+    if (len && (dir[len - 1] == '/' || dir[len - 1] == '\\')) dir[--len] = '\0';
     char *slash = strrchr(dir, '/');
     if (slash) {
         *slash = '\0';
-        char *parent = strrchr(dir, '/');
-        if (parent) {
-            *parent = '\0';
-            mkdir(dir, 0755);
-            *parent = '/';
-        }
-        mkdir(dir, 0755);
+        albw_mkdir(dir);
+        *slash = '/';
     }
+    albw_mkdir(dir);
     FILE *f = fopen(path, "w");
     if (!f) return;
     fprintf(f, "fullscreen=%d\nlayout=%s\nrenderer=%s\nresolution=%s\nantialias=%s\nupscale=%s\n"
@@ -175,7 +173,7 @@ const struct albw_settings *albw_settings_load(void) {
     // The language goes to the game the way it always has, as ALBW_LANGUAGE, read when it first
     // asks the console which one it is set to.
     if (settings.language && !getenv("ALBW_LANGUAGE")) {
-        setenv("ALBW_LANGUAGE", languages[settings.language].code, 1);
+        albw_setenv("ALBW_LANGUAGE", languages[settings.language].code);
     }
     return &settings;
 }
@@ -223,13 +221,27 @@ static unsigned char *read_file(const char *path) {
 // family named, fontconfig's answer counts only if it is that family and not its nearest stand-in.
 static unsigned char *find_font_of(const char *pattern, const char *family,
                                    const char *const *fallbacks) {
-    char cmd[200], path[600] = "";
+    char path[600] = "";
+#ifdef _WIN32
+    // No fontconfig: the system's own fonts, by file name.
+    (void)pattern;
+    const char *windir = getenv("WINDIR");
+    for (int i = 0; fallbacks[i]; i++) {
+        if (strncmp(fallbacks[i], "%WINDIR%", 8)) continue;
+        snprintf(path, sizeof path, "%s%s", windir ? windir : "C:\\Windows", fallbacks[i] + 8);
+        unsigned char *d = read_file(path);
+        if (d) return d;
+    }
+    path[0] = '\0';
+#else
+    char cmd[200];
     snprintf(cmd, sizeof cmd, "fc-match -f '%%{family}|%%{file}' '%s' 2>/dev/null", pattern);
     FILE *p = popen(cmd, "r");
     if (p) {
         if (!fgets(path, sizeof path, p)) path[0] = '\0';
         pclose(p);
     }
+#endif
     char *bar = strchr(path, '|');
     if (bar) {
         *bar = '\0';
@@ -499,24 +511,93 @@ void albw_launcher_set_card(const char *product) {
     snprintf(card_product, sizeof card_product, "%s", product ? product : "");
 }
 
+// The card, when none is known yet -- started from a desktop's menu, the first time: Play opens
+// SDL's file dialog (which goes through the desktop's own), and what is picked is checked and
+// remembered by the chooser main() hands over. The dialog answers on a thread of its own, so its
+// answer waits here until the next frame takes it.
+static int (*card_chooser)(const char *path, char product[17], char *why, size_t n);
+static SDL_Mutex *card_mutex;
+static char card_picked_path[1024], card_why[240];
+static int card_dialog;                                  // 0 closed, 1 open, 2 a path waiting
+
+void albw_launcher_set_card_chooser(int (*chooser)(const char *path, char product[17], char *why,
+                                                   size_t n)) {
+    card_chooser = chooser;
+}
+
+static void SDLCALL card_picked(void *userdata, const char *const *files, int filter) {
+    (void)userdata;
+    (void)filter;
+    SDL_LockMutex(card_mutex);
+    card_dialog = 0;
+    if (files && files[0]) {
+        snprintf(card_picked_path, sizeof card_picked_path, "%s", files[0]);
+        card_dialog = 2;
+    } else if (!files) {
+        snprintf(card_why, sizeof card_why, "The file dialog did not open (%s). Start the port once "
+                 "with the card's path instead.", SDL_GetError());
+    }
+    SDL_UnlockMutex(card_mutex);
+}
+
+static void card_ask(void) {
+    if (!card_mutex) card_mutex = SDL_CreateMutex();
+    if (!card_mutex) return;
+    SDL_LockMutex(card_mutex);
+    int open = card_dialog != 0;
+    if (!open) card_dialog = 1;
+    SDL_UnlockMutex(card_mutex);
+    if (open) return;
+    static const SDL_DialogFileFilter filters[] = {
+        { "3DS card images", "3ds;cci" }, { "All files", "*" },
+    };
+    SDL_ShowOpenFileDialog(card_picked, NULL, window, filters, 2, NULL, false);
+}
+
+// A path the dialog picked, checked; called each frame the launcher is drawn.
+static void card_take(void) {
+    if (!card_mutex) return;
+    char path[1024];
+    SDL_LockMutex(card_mutex);
+    int waiting = card_dialog == 2;
+    if (waiting) {
+        snprintf(path, sizeof path, "%s", card_picked_path);
+        card_dialog = 0;
+    }
+    SDL_UnlockMutex(card_mutex);
+    if (!waiting || !card_chooser) return;
+    char product[17], why[240];
+    if (card_chooser(path, product, why, sizeof why)) {
+        snprintf(card_product, sizeof card_product, "%s", product);
+        card_why[0] = '\0';
+    } else {
+        snprintf(card_why, sizeof card_why, "%s", why);
+    }
+}
+
 int albw_launcher_init(SDL_Window *w, SDL_Renderer *r) {
     window = w;
     renderer = r;
     for (int i = 0; i < LANGUAGES; i++) language_names[i] = languages[i].name;
     // A condensed sans for the menu, as launchers of this kind have it: Fira Sans Condensed where it
     // is installed, else whatever sans the system has. The title takes Cinzel if the user has it.
+    // On Windows the system's own: Segoe UI, which every release since Vista has.
     static const char *const title[] = {
+        "%WINDIR%\\Fonts\\seguisb.ttf", "%WINDIR%\\Fonts\\segoeuib.ttf", "%WINDIR%\\Fonts\\arialbd.ttf",
+        "%WINDIR%\\Fonts\\tahomabd.ttf", "%WINDIR%\\Fonts\\tahoma.ttf",
         "/usr/share/fonts/TTF/FiraSansCondensed-SemiBold.ttf",
         "/usr/share/fonts/noto/NotoSans-SemiCondensedSemiBold.ttf",
         "/usr/share/fonts/TTF/DejaVuSansCondensed-Bold.ttf", NULL,
     };
     static const char *const item[] = {
+        "%WINDIR%\\Fonts\\segoeui.ttf", "%WINDIR%\\Fonts\\arial.ttf", "%WINDIR%\\Fonts\\tahoma.ttf",
         "/usr/share/fonts/TTF/FiraSansCondensed-Medium.ttf",
         "/usr/share/fonts/TTF/DejaVuSansCondensed.ttf", "/usr/share/fonts/noto/NotoSans-Regular.ttf",
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
         "/usr/share/fonts/liberation/LiberationSans-Regular.ttf", NULL,
     };
     static const char *const small[] = {
+        "%WINDIR%\\Fonts\\segoeui.ttf", "%WINDIR%\\Fonts\\arial.ttf", "%WINDIR%\\Fonts\\tahoma.ttf",
         "/usr/share/fonts/TTF/FiraSansCondensed-Regular.ttf", "/usr/share/fonts/noto/NotoSans-Regular.ttf",
         "/usr/share/fonts/TTF/DejaVuSans.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", NULL,
     };
@@ -537,12 +618,10 @@ int albw_launcher_init(SDL_Window *w, SDL_Renderer *r) {
     // A picture of the player's own for behind the menu: background.png or .jpg beside the
     // settings. Nothing of the kind comes with the port.
 #if HAVE_STB_IMAGE
-    const char *xdg = getenv("XDG_CONFIG_HOME"), *home = getenv("HOME");
     static const char *const names[] = { "background.png", "background.jpg", "background.jpeg" };
     for (size_t i = 0; i < sizeof names / sizeof names[0] && !wallpaper; i++) {
         char path[600];
-        if (xdg && *xdg) snprintf(path, sizeof path, "%s/albw-port/%s", xdg, names[i]);
-        else snprintf(path, sizeof path, "%s/.config/albw-port/%s", home ? home : ".", names[i]);
+        albw_config_path(path, sizeof path, names[i]);
         int iw, ih, n;
         unsigned char *px = stbi_load(path, &iw, &ih, &n, 4);
         if (!px) continue;
@@ -606,6 +685,11 @@ static enum albw_launcher_action confirm(void) {
     }
     switch (sel_main) {
         case ITEM_PLAY:
+            // With no card yet, Play asks for one first.
+            if (!card_product[0] && card_chooser && !started) {
+                card_ask();
+                return ALBW_LAUNCHER_NONE;
+            }
             want_visible = 0;
             started = 1;
             return ALBW_LAUNCHER_PLAY;
@@ -735,6 +819,7 @@ static float approach(float v, float target, float rate, float dt) {
 }
 
 void albw_launcher_draw(SDL_Texture *top) {
+    card_take();
     uint64_t now = SDL_GetTicksNS();
     float dt = (float)(now - last_ns) * 1e-9f, t = (float)now * 1e-9f;
     if (dt > 0.1f) dt = 0.1f;
@@ -812,7 +897,9 @@ void albw_launcher_draw(SDL_Texture *top) {
         for (int i = 0; i < MAIN_ITEMS; i++) {
             float *g = &glow[i];
             *g = approach(*g, i == sel_main ? 1.0f : 0.0f, 14.0f, dt);
-            const char *label = (i == ITEM_PLAY && started) ? "RESUME" : labels[i];
+            const char *label = (i == ITEM_PLAY && started) ? "RESUME"
+                              : (i == ITEM_PLAY && !card_product[0] && card_chooser) ? "CHOOSE CARD"
+                              : labels[i];
             int dim = i == ITEM_MODS;
             float x = x0 + *g * W * 0.012f;
             if (*g > 0.02f) {
@@ -899,6 +986,15 @@ void albw_launcher_draw(SDL_Texture *top) {
 
     // The card, and what to press.
     float yb = H * 0.93f;
+    if (!card_product[0] && card_chooser && page == PAGE_MAIN) {
+        // No card yet: what Play will do, or why the last one picked was not taken.
+        text(&f_small, x0, yb - H * 0.032f, card_why[0] ? "That file is not a card this build plays."
+                                                          : "No card image yet.",
+             card_why[0] ? gold : grey, 0.9f * fade);
+        text(&f_small, x0, yb, card_why[0] ? card_why
+                                           : "Choose a decrypted dump of your own cartridge; it is remembered.",
+             grey, 0.7f * fade);
+    }
     if (card_product[0] && page == PAGE_MAIN) {
         char line[96];
         char region = card_product[9];
@@ -915,10 +1011,11 @@ void albw_launcher_draw(SDL_Texture *top) {
     const char *version = "World Across 0.1";
     text(&f_small, W - x0 - text_width(&f_small, version), yb, version, grey, 0.6f * fade);
 #ifdef ALBW_HAVE_DLSS
-    // NVIDIA's licence for the DLSS SDK asks that a program using it credit NVIDIA where it shows
-    // who made what: on the launcher's first page, under the version.
+    // NVIDIA's licence for the DLSS SDK (section 7.1 b of its RTX supplement) asks a program that
+    // includes it to name the SDK on its splash screen, about box and credits; the launcher's
+    // first page is all three here. Only a build with the SDK shows it.
     if (page == PAGE_MAIN) {
-        const char *credit = "NVIDIA DLSS \xc2\xb7 NVIDIA Corporation";
+        const char *credit = "NVIDIA DLSS";
         text(&f_small, W - x0 - text_width(&f_small, credit), yb + H * 0.032f, credit, grey, 0.5f * fade);
     }
 #endif

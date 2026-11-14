@@ -1859,13 +1859,10 @@ static unsigned long rasterise_band(const struct batch *b, const struct prepared
 // counter carries the job's generation and size, so a thread that comes late to one job can never
 // take an item that belongs to the next. A thread with nothing to do spins for a while before it
 // sleeps: draws come in bursts, and waking a sleeping thread takes longer than most jobs.
+#include "albw_platform.h"
 #include <pthread.h>
-#include <sched.h>
 #include <stdatomic.h>
-#include <linux/futex.h>
-#include <sys/syscall.h>
 #include <time.h>
-#include <unistd.h>
 
 #define MAX_WORKERS 32
 #define SPIN_NS 200000L                                  // how long an idle thread keeps looking
@@ -1891,9 +1888,6 @@ static _Thread_local void *job_arg;
 // Per-thread pixel counts, a cache line each.
 static struct { unsigned long n; char pad[56]; } pixels_by_worker[MAX_WORKERS + 1];
 
-static long futex(_Atomic uint32_t *word, int op, uint32_t value) {
-    return syscall(SYS_futex, (uint32_t *)word, op, value, NULL, NULL, 0);
-}
 
 static uint64_t now_ns(void) {
     struct timespec t;
@@ -1928,7 +1922,7 @@ static void *worker_main(void *arg) {
                 if (++spins % 64u == 0 && now_ns() > until) {
                     atomic_fetch_add_explicit(&sleepers, 1, memory_order_seq_cst);
                     if (atomic_load_explicit(&job_wake, memory_order_seq_cst) == seen) {
-                        futex(&job_wake, FUTEX_WAIT_PRIVATE, seen);
+                        albw_wait_on((volatile uint32_t *)&job_wake, seen);
                     }
                     atomic_fetch_sub_explicit(&sleepers, 1, memory_order_seq_cst);
                     until = now_ns() + SPIN_NS;
@@ -1952,7 +1946,7 @@ static void *worker_main(void *arg) {
 
 static void start_workers(void) {
     const char *s = albw_env("ALBW_RENDER_THREADS");
-    long n = s ? atol(s) : sysconf(_SC_NPROCESSORS_ONLN) - 1;
+    long n = s ? atol(s) : albw_cpu_count() - 1;
 #ifdef ALBW_TRACK_WRITES
     n = 1;                                               // the write record is not thread-safe
 #endif
@@ -2005,7 +1999,7 @@ static void pool_run_arg(void (*fn)(uint32_t item, int worker), void *arg, uint3
                           memory_order_release);
     atomic_fetch_add_explicit(&job_wake, 1, memory_order_seq_cst);
     if (atomic_load_explicit(&sleepers, memory_order_seq_cst) > 0) {
-        futex(&job_wake, FUTEX_WAKE_PRIVATE, (uint32_t)workers);
+        albw_wake_all((volatile uint32_t *)&job_wake);
     }
     while (take_one(sl, 0)) {}
     while (atomic_load_explicit(&sl->done, memory_order_acquire) < items) __builtin_ia32_pause();
