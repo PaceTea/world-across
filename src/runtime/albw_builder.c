@@ -249,19 +249,37 @@ static void *compile_worker(void *arg) {
 }
 
 // What play has taught the build. When the game reaches code the module lacks, the runtime notes the
-// address in missing_entries.txt beside the saves; the next build folds it into the release's
-// addresses, and keeps it -- with every one before it -- in learned-<product>.txt there, so that
-// it is never needed twice. (That file can only be made by playing, so it lives with the saves,
-// not in the cache.)
-static void missing_path(char *out, size_t n) { snprintf(out, n, "%s/missing_entries.txt", albw_save_root()); }
+// address in missing-<product>.txt beside the saves; the next build folds it into the release's
+// addresses, and keeps it -- with every one before it -- in found-<product>.txt there, so that it
+// is never needed twice. (That file can only be made by playing, so it lives with the saves, not
+// in the cache.) Version 0.1.1 wrote missing_entries.txt and learned-<product>.txt, without the
+// release in the one and with Thumb addresses' low bit lost: both are left alone.
+static void missing_path(char *out, size_t n, const char *product) {
+    snprintf(out, n, "%s/missing-%s.txt", albw_save_root(), product);
+}
 
 static void learned_path(char *out, size_t n, const char *product) {
-    snprintf(out, n, "%s/learned-%s.txt", albw_save_root(), product);
+    snprintf(out, n, "%s/found-%s.txt", albw_save_root(), product);
+}
+
+// The release of the game there now, from the card it was made from.
+static int built_product(char *out, size_t n) {
+    char path[800];
+    paths();
+    snprintf(path, sizeof path, "%s/rom-extract/product_code.txt", build_dir);
+    FILE *f = fopen(path, "r");
+    out[0] = '\0';
+    if (f) {
+        if (fgets(out, (int)n, f)) out[strcspn(out, " \r\n")] = '\0';
+        fclose(f);
+    }
+    return out[0] && !strpbrk(out, "/\\.");
 }
 
 int albw_build_has_missing(void) {
-    char path[700];
-    missing_path(path, sizeof path);
+    char prod[32], path[700];
+    if (!built_product(prod, sizeof prod)) return 0;
+    missing_path(path, sizeof path, prod);
     struct stat st;
     return stat(path, &st) == 0 && st.st_size > 0;
 }
@@ -443,7 +461,7 @@ static int build(const char *card) {
         size_t from_kit = known.n;
         learned_path(from, sizeof from, product);
         addrs_read(&known, from);
-        missing_path(from, sizeof from);
+        missing_path(from, sizeof from, product);
         addrs_read(&known, from);
         if (known.n > from_kit) {
             log_line("%zu addresses play has found, besides the package's %zu", known.n - from_kit, from_kit);
@@ -557,7 +575,7 @@ static int build(const char *card) {
         struct addrs learned = { 0 };
         char missing[700];
         learned_path(to, sizeof to, product);
-        missing_path(missing, sizeof missing);
+        missing_path(missing, sizeof missing, product);
         addrs_read(&learned, to);
         addrs_read(&learned, missing);
         if (addrs_write(&learned, to)) remove(missing);

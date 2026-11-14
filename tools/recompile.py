@@ -1439,8 +1439,9 @@ class Translator:
                     self.gaps['fallthrough to unknown address'] += 1
                     unsupported.append((ins.address, 'fallthrough',
                                         f'to 0x{t:08x}, not a function'))
+                    # The target in the form an entry list takes it: Thumb with its low bit set.
                     out.append('    albw_missing_function(c, 0x%08xu, 0x%08xu);'
-                               % (ins.address, t))
+                               % (ins.address, t | 1 if self.thumb else t))
         out.append('}')
         return '\n'.join(out), unsupported
 

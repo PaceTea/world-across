@@ -35,7 +35,7 @@ int albw_build_run(const char *card);
 // again.
 int albw_build_current(void);
 
-// Whether the last run met code the game lacks (missing_entries.txt beside the saves): the next
+// Whether the last run met code the game lacks (missing-<product>.txt beside the saves): the next
 // build translates it as well.
 int albw_build_has_missing(void);
 

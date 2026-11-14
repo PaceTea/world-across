@@ -179,11 +179,17 @@ static void make_dirs(const char *path) {
     albw_mkdir(buf);
 }
 
+// The release the launcher's game module is a translation of: what it misses is that release's.
+static const char *missing_product = "";
+
 static void note_for_catch_up(uint32_t target) {
     if (discover_fp) return;                             // the discovery loop's run: its own file
     char path[600];
     make_dirs(albw_save_root());
-    snprintf(path, sizeof path, "%s/missing_entries.txt", albw_save_root());
+    if (missing_product[0])
+        snprintf(path, sizeof path, "%s/missing-%s.txt", albw_save_root(), missing_product);
+    else
+        snprintf(path, sizeof path, "%s/missing_entries.txt", albw_save_root());
     discover_fp = fopen(path, "a");
     if (!discover_fp) return;
     record_missing(target);
@@ -242,7 +248,9 @@ void albw_dispatch(albw_cpu *c, uint32_t target) {
     if (record_missing(target)) exit(0);
     fprintf(stderr, "[dispatch] no translated function at 0x%08x "
                     "(indirect target outside the slice)\n", t);
-    note_for_catch_up(t);
+    // Noted as the guest branched to it: a Thumb target keeps its low bit, which is how an entry
+    // list says Thumb -- without it the next build would take it for ARM code.
+    note_for_catch_up(target);
     exit(2);
 }
 
@@ -659,6 +667,7 @@ static int module_load(const char *path) {
     module_addrs = g->addrs;
     module_ptrs = g->ptrs;
     build_product_v = g->product;
+    if (g->product && g->product[0] && !strpbrk(g->product, "/\\.")) missing_product = g->product;
     build_hash_v = g->code_hash;
     build_size_v = g->code_size;
     build_known_v = 1;
