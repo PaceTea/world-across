@@ -378,6 +378,8 @@ void main() {
     gl_FragDepth = clamp(depth, 0.0, 1.0);
 
     o_color = vec4(previous) / 255.0;
+    // Drawn opaque onto the upscaler's overlay: covering what is beneath it there entirely.
+    if (u_info.z != 0u) o_color.a = 1.0;
 
     // Where this surface was a frame before, less where it is now, the jitter taken out.
     vec2 here = gl_FragCoord.xy - u_jitter.xy;

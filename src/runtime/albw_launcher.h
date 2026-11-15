@@ -40,8 +40,9 @@ enum { ALBW_RENDERER_GPU, ALBW_RENDERER_SOFTWARE, ALBW_RENDERERS };
 enum { ALBW_AA_OFF, ALBW_AA_2X, ALBW_AA_4X, ALBW_AA_8X, ALBW_AAS };
 
 // What touches the touch screen besides the mouse, which always does: a gamepad's touchpad, its
-// gyroscope (aimed after pressing the right stick in), or both.
-enum { ALBW_TOUCH_MOUSE, ALBW_TOUCH_TOUCHPAD, ALBW_TOUCH_GYRO, ALBW_TOUCH_BOTH, ALBW_TOUCHES };
+// gyroscope (aimed after pressing the right stick in), its right stick, or all of them.
+enum { ALBW_TOUCH_MOUSE, ALBW_TOUCH_TOUCHPAD, ALBW_TOUCH_GYRO, ALBW_TOUCH_STICK, ALBW_TOUCH_ALL,
+       ALBW_TOUCHES };
 
 // The sharpening that follows an upscaler, in stops, as RCAS takes it: 0 is the most, each stop
 // halves it.
@@ -114,6 +115,9 @@ int albw_prompt_answer(uint16_t *text, unsigned *n);
 int albw_prompt_visible(void);
 void albw_prompt_event(const SDL_Event *e);
 void albw_prompt_draw(void);
+
+// The top screen as the game was left, kept as the menu's backdrop for its next start.
+void albw_launcher_keep_backdrop(SDL_Surface *shot);
 
 int albw_launcher_visible(void);
 void albw_launcher_show(int settings_page);

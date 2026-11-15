@@ -65,7 +65,11 @@ your machine: `rom-extract/`, `src/generated/`, `ghidra*/` and `*.3ds` are all i
 
 The exception is `entries/`, lists of guest addresses the running game branched to that nothing
 in the image points at, one file per release by its product code (`CTR-P-BZLE.txt` is the American
-one). They are kept so that a build is reproducible rather than depending on how far someone has
+one), and, beside it, where that release's functions start as the search finds them on its own
+(`CTR-P-BZLE.starts`, made by `tools/find_functions.py --starts`). A release with no list of its
+own -- the European one, say -- has the American list carried over: the two are the same program
+laid out a little differently, the gaps between their functions show by how much each stretch
+moved, and an address moves with its stretch. They are kept so that a build is reproducible rather than depending on how far someone has
 played. They are addresses, not code. Another release needs none of them to build: its own file
 starts empty and fills as `tools/catch_up.sh` meets what is missing.
 
@@ -235,8 +239,10 @@ exactly as before.
 
 The window opens on a launcher: Play, Settings and Quit. The game itself starts only on Play --
 nothing runs or sounds before. Behind the menu goes a picture of your own if you put one at
-`~/.config/albw-port/background.png` (or `.jpg`); none comes with the port. The menu is set in Fira
-Sans Condensed where it is installed, and the title in Cinzel if you have that. Settings
+`~/.config/albw-port/background.png` (or `.jpg`); none comes with the port. Without one, the menu
+shows the scene the game was left in last time -- kept when the window closes after at least two
+minutes of play, from your own game, in the cache folder as `backdrop.jpg`. The menu is set in Fira
+Sans Condensed (SIL Open Font License, in `third_party/fonts/`), which the packages bring along. Settings
 (fullscreen, how the screens are arranged, the renderer, its resolution and anti-aliasing,
 upscaling and its sharpening, the frame rate, whole-pixel scaling, sound, gamepads, the touch screen
 controls, the game's language) are applied at once and saved in
@@ -255,20 +261,25 @@ the picture keeps its shape.
 | X, Y | I, U | top and left face buttons |
 | L, R | Q, E | shoulder buttons or triggers |
 | Start, Select | Enter, Backspace | Start, Back |
-| Touch screen | left mouse button on the bottom screen | touchpad, or right stick and gyroscope (below) |
+| Touch screen | left mouse button on the bottom screen | touchpad, right stick, or gyroscope (below) |
 
 The face buttons go by position, not by label: the console's A is on the right and its B at the
 bottom, and that is what hands remember, whatever the pad prints on them.
 
 The touch screen from a gamepad, as the Touch Screen Controls setting has it (Mouse, Touchpad,
-Gyro, or Both, the default; the mouse works with all of them):
+Gyro, Stick, or All, the default; the mouse works with all of them). A small ring on the bottom
+screen shows where a touch lands:
 
 - **Touchpad** -- a DualShock 4's, a DualSense's, or either of the Steam Controller's: a finger on
   it shows a small ring on the bottom screen, the whole pad standing for the whole screen, and
   pressing the pad in touches the screen there.
-- **Gyro**, for pads without a touchpad: press the right stick in and the ring appears in the
-  middle; tilt and turn the pad to move it. Press the stick in again to touch -- held, it drags --
-  and let go: the touch ends and the ring is gone.
+- **Stick** -- the right stick, which the console never had: tilting it moves the ring, slowly
+  for a slight tilt, quickly for a full one; pressed in, it touches there -- held, it drags. Left
+  alone a few seconds, the ring fades.
+- **Gyro**: press the right stick in and the ring appears; tilt and turn the pad to move it. Press
+  the stick in again to touch -- held, it drags -- and let go: the touch ends and the ring is gone.
+
+Whichever brought the ring up, the right stick pressed in while it is there touches.
 
 The ring never leaves the screen.
 
@@ -296,6 +307,8 @@ the tools -- or with `ALBW_USERNAME` set, that name (or the login name) is confi
 | `ALBW_INTEGER_SCALE` | keep every pixel the same size when scaling |
 | `ALBW_MUTE=1` | no sound |
 | `ALBW_GAMEPADS=0` | ignore gamepads, keyboard and mouse only |
+| `ALBW_QUIT_AT=<frame>` | close the window at that frame, as the player would |
+| `ALBW_SCREENSHOTS=<n>` | with `ALBW_SCREENSHOT`, that many pictures shown one after another (frames in between among them), as `<file>.<i>.bmp` |
 | `ALBW_PROMPT_TYPE=<text>` | type that into the name field as soon as it opens, and confirm it |
 | `ALBW_RING=<x>,<y>` | hold the gamepad's touch ring at that point of the bottom screen, for screenshots of it |
 | `ALBW_WAV=<file>` | also write the sound to a WAV file, with or without a window |
@@ -489,7 +502,8 @@ src/ffx/         what AMD's FidelityFX SDK needs to build on Linux
 entries/         guest addresses the running game branched to, per release (see above)
 tools/           extraction, recompiler, oracle, discovery loop, regression checks, Ghidra scripts,
                  the packaging scripts (tools/appimage: what the AppImage needs)
-third_party/     AMD FSR 1, unchanged; the licences of what the packages bundle (kit/)
+third_party/     AMD FSR 1 and Fira Sans Condensed, unchanged; the licences of what the packages
+                 bundle (kit/)
 cmake/           build helpers
 ```
 

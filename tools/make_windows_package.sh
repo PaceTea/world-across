@@ -62,7 +62,7 @@ mkdir -p "$kit/tools" "$kit/entries" "$kit/include" "$kit/glue"
 # The translating tools, the addresses the game is known to branch to, and what the translation is
 # compiled with: the header it includes and the glue that makes it a module.
 cp "$root/tools/extract_rom.py" "$root/tools/find_functions.py" "$root/tools/recompile.py" "$kit/tools/"
-cp "$root"/entries/*.txt "$kit/entries/"
+cp "$root"/entries/*.txt "$root"/entries/*.starts "$kit/entries/"
 cp "$root/src/runtime/albw_cpu.h" "$root/src/runtime/albw_game.h" "$kit/include/"
 cp "$root/src/runtime/albw_game_glue.c" "$kit/glue/"
 
@@ -172,6 +172,10 @@ cp "$root/third_party/kit/GPL-3.0.txt" "$root/third_party/kit/LGPL-3.0.txt" \
 
 cp "$root/LICENSE" "$out/LICENSE.txt"
 cp "$root/third_party/fsr1/license.txt" "$out/licences/FSR1-LICENSE.txt"
+# The menu's type, beside the program where the launcher looks for it.
+mkdir -p "$out/fonts"
+cp "$root"/third_party/fonts/*.ttf "$out/fonts/"
+cp "$root/third_party/fonts/OFL.txt" "$out/licences/FiraSans-OFL.txt"
 sdl_licence=
 for sdl in "$root"/external/SDL3-*/LICENSE.txt; do [ -f "$sdl" ] && sdl_licence=$sdl; done
 [ -n "$sdl_licence" ] || die "no SDL3 licence in external/SDL3-*/"
@@ -190,6 +194,9 @@ SDL 3 (SDL3.dll) -- zlib licence, SDL3-LICENSE.txt
 
 AMD FidelityFX Super Resolution 1 (in WorldAcross.exe) -- MIT, FSR1-LICENSE.txt
     https://github.com/GPUOpen-Effects/FidelityFX-FSR
+
+Fira Sans Condensed 4.301 (fonts) -- SIL Open Font License 1.1, FiraSans-OFL.txt
+    https://github.com/bBoxType/FiraSans
 
 Python 3.14.10, the embeddable distribution (kit\python) -- PSF licence; libffi and the rest it
 includes are listed in Python-LICENSE.txt

@@ -24,6 +24,15 @@
 #pragma GCC diagnostic pop
 #define HAVE_STB_IMAGE 1
 #endif
+#if __has_include(<stb/stb_image_write.h>)
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+#define STB_IMAGE_WRITE_STATIC
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-function"
+#include <stb/stb_image_write.h>
+#pragma GCC diagnostic pop
+#define HAVE_STB_WRITE 1
+#endif
 #else
 #define HAVE_STB 0                                       // no text: the game starts without the menu
 #endif
@@ -42,7 +51,7 @@ static struct albw_settings settings = {
     .layout = ALBW_LAYOUT_STACKED, .antialias = ALBW_AA_4X, .upscale = ALBW_UPSCALE_OFF,
     .sharpness = 1,
     .frame_rate = ALBW_RATE_CONSOLE, .frame_gen = ALBW_FRAMEGEN_OFF, .sound = 1, .gamepads = 1,
-    .touch_controls = ALBW_TOUCH_BOTH,
+    .touch_controls = ALBW_TOUCH_ALL,
 };
 
 // The words the settings file uses for each choice, in the order of the enums.
@@ -57,7 +66,7 @@ static const char *const resolution_keys[ALBW_RESOLUTIONS] = {
     "auto", "1", "2", "3", "4", "5", "6", "7", "8",
 };
 static const char *const aa_keys[ALBW_AAS] = { "off", "2", "4", "8" };
-static const char *const touch_keys[ALBW_TOUCHES] = { "mouse", "touchpad", "gyro", "both" };
+static const char *const touch_keys[ALBW_TOUCHES] = { "mouse", "touchpad", "gyro", "stick", "all" };
 
 static int key_index(const char *const *keys, int count, const char *v, int otherwise) {
     for (int i = 0; i < count; i++) {
@@ -143,8 +152,9 @@ const struct albw_settings *albw_settings_load(void) {
         else if (!strcmp(line, "integer")) settings.integer_scale = atoi(v) != 0;
         else if (!strcmp(line, "sound")) settings.sound = atoi(v) != 0;
         else if (!strcmp(line, "gamepads")) settings.gamepads = atoi(v) != 0;
-        else if (!strcmp(line, "touch"))
-            settings.touch_controls = key_index(touch_keys, ALBW_TOUCHES, v, ALBW_TOUCH_BOTH);
+        else if (!strcmp(line, "touch"))                 // "both" was touchpad and gyro, before the stick
+            settings.touch_controls = !strcmp(v, "both") ? ALBW_TOUCH_ALL
+                                    : key_index(touch_keys, ALBW_TOUCHES, v, ALBW_TOUCH_ALL);
         else if (!strcmp(line, "language")) {
             for (int i = 0; i < LANGUAGES; i++) {
                 if (!strcmp(languages[i].code, v)) settings.language = i;
@@ -204,6 +214,7 @@ static SDL_Window *window;
 static SDL_Renderer *renderer;
 static unsigned char *serif_data, *sans_data, *small_data;
 static SDL_Texture *wallpaper;
+static int wallpaper_is_scene;                           // the kept backdrop, not the player's picture
 static struct font f_title, f_kicker, f_item, f_small;
 static int baked_for_h;
 
@@ -267,6 +278,21 @@ static unsigned char *find_font_of(const char *pattern, const char *family,
 
 static unsigned char *find_font(const char *pattern, const char *const *fallbacks) {
     return find_font_of(pattern, NULL, fallbacks);
+}
+
+// The menu's own type, Fira Sans Condensed (SIL Open Font License), which the packages bring: beside
+// the program (fonts/), where an AppImage keeps it, or in the checkout it was built in.
+static unsigned char *bundled_font(const char *file) {
+    char exe[600], path[800];
+    albw_exe_dir(exe, sizeof exe);
+    const char *const layouts[] = { "%s/fonts/%s", "%s/../share/world-across/fonts/%s",
+                                    "%s/../third_party/fonts/%s" };
+    for (size_t i = 0; i < sizeof layouts / sizeof layouts[0]; i++) {
+        snprintf(path, sizeof path, layouts[i], exe, file);
+        unsigned char *d = read_file(path);
+        if (d) return d;
+    }
+    return NULL;
 }
 
 static void bake(struct font *f, const unsigned char *data, float size) {
@@ -375,7 +401,7 @@ static const char *const rate_names[ALBW_RATES] = { "60 (console)", "Display", "
 static const char *const framegen_names[ALBW_FRAMEGENS] = { "Off", "FSR 3", "DLSS" };
 static const char *const renderer_names[ALBW_RENDERERS] = { "GPU", "Software" };
 static const char *const aa_names[ALBW_AAS] = { "Off", "2x MSAA", "4x MSAA", "8x MSAA" };
-static const char *const touch_names[ALBW_TOUCHES] = { "Mouse", "Touchpad", "Gyro", "Both" };
+static const char *const touch_names[ALBW_TOUCHES] = { "Mouse", "Touchpad", "Gyro", "Stick", "All" };
 // Each multiple with the height it gives the top screen.
 static const char *const resolution_names[ALBW_RESOLUTIONS] = {
     "Auto", "1x (240p)", "2x (480p)", "3x (720p)", "4x (960p)", "5x (1200p)", "6x (1440p)",
@@ -504,7 +530,8 @@ static const char *describe(int row, int choice) {
                 "The mouse on the bottom screen is the stylus; gamepads leave the touch screen alone.",
                 "A finger on the touchpad shows a ring on the touch screen; press the pad in to touch.",
                 "Right stick in: a ring you aim by tilting the gamepad. In again to touch, held to drag.",
-                "The touchpad, and the right stick with the gyroscope. The mouse always works too.",
+                "The right stick moves a ring over the touch screen; pressed in, it touches there.",
+                "Touchpad, right stick and gyroscope, whichever the gamepad has. The mouse works too.",
             };
             return text[choice];
         }
@@ -638,9 +665,9 @@ int albw_launcher_init(SDL_Window *w, SDL_Renderer *r) {
     renderer = r;
     if (!prompt_mutex) prompt_mutex = SDL_CreateMutex();
     for (int i = 0; i < LANGUAGES; i++) language_names[i] = languages[i].name;
-    // A condensed sans for the menu, as launchers of this kind have it: Fira Sans Condensed where it
-    // is installed, else whatever sans the system has. The title takes Cinzel if the user has it.
-    // On Windows the system's own: Segoe UI, which every release since Vista has.
+    // A condensed sans for the menu, as launchers of this kind have it: Fira Sans Condensed, the
+    // copy the package brings or else one installed, else whatever sans the system has -- on
+    // Windows Segoe UI, which every release since Vista has.
     static const char *const title[] = {
         "%WINDIR%\\Fonts\\seguisb.ttf", "%WINDIR%\\Fonts\\segoeuib.ttf", "%WINDIR%\\Fonts\\arialbd.ttf",
         "%WINDIR%\\Fonts\\tahomabd.ttf", "%WINDIR%\\Fonts\\tahoma.ttf",
@@ -661,9 +688,12 @@ int albw_launcher_init(SDL_Window *w, SDL_Renderer *r) {
         "/usr/share/fonts/TTF/DejaVuSans.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", NULL,
     };
 #if HAVE_STB
-    serif_data = find_font_of("Cinzel:bold", "Cinzel", title);
-    sans_data = find_font_of("Fira Sans Condensed:medium", "Fira Sans Condensed", item);
-    small_data = find_font_of("Fira Sans Condensed", "Fira Sans Condensed", small);
+    serif_data = bundled_font("FiraSansCondensed-SemiBold.ttf");
+    sans_data = bundled_font("FiraSansCondensed-Medium.ttf");
+    small_data = bundled_font("FiraSansCondensed-Regular.ttf");
+    if (!serif_data) serif_data = find_font_of("Fira Sans Condensed:semibold", "Fira Sans Condensed", title);
+    if (!sans_data) sans_data = find_font_of("Fira Sans Condensed:medium", "Fira Sans Condensed", item);
+    if (!small_data) small_data = find_font_of("Fira Sans Condensed", "Fira Sans Condensed", small);
     if (!sans_data) sans_data = find_font("sans", item);
 #endif
     if (!sans_data) {
@@ -675,12 +705,20 @@ int albw_launcher_init(SDL_Window *w, SDL_Renderer *r) {
     if (!small_data) small_data = sans_data;
 
     // A picture of the player's own for behind the menu: background.png or .jpg beside the
-    // settings. Nothing of the kind comes with the port.
+    // settings. Nothing of the kind comes with the port; without one, the scene the game was left
+    // in last time (albw_launcher_keep_backdrop), from the player's own card.
 #if HAVE_STB_IMAGE
-    static const char *const names[] = { "background.png", "background.jpg", "background.jpeg" };
+    static const char *const names[] = { "background.png", "background.jpg", "background.jpeg",
+                                         "backdrop.jpg" };
     for (size_t i = 0; i < sizeof names / sizeof names[0] && !wallpaper; i++) {
         char path[600];
-        albw_config_path(path, sizeof path, names[i]);
+        if (i < 3) {
+            albw_config_path(path, sizeof path, names[i]);
+        } else {
+            char root[500];
+            albw_cache_root(root, sizeof root);
+            snprintf(path, sizeof path, "%s/%s", root, names[i]);
+        }
         int iw, ih, n;
         unsigned char *px = stbi_load(path, &iw, &ih, &n, 4);
         if (!px) continue;
@@ -689,6 +727,7 @@ int albw_launcher_init(SDL_Window *w, SDL_Renderer *r) {
             SDL_UpdateTexture(wallpaper, NULL, px, iw * 4);
             SDL_SetTextureScaleMode(wallpaper, SDL_SCALEMODE_LINEAR);
             SDL_SetTextureBlendMode(wallpaper, SDL_BLENDMODE_BLEND);
+            wallpaper_is_scene = i == 3;
             printf("[launch] background %s, %dx%d\n", path, iw, ih);
         }
         stbi_image_free(px);
@@ -942,7 +981,8 @@ void albw_launcher_draw(SDL_Texture *top) {
     // The settings page dims the picture further, so that its rows -- the dimmed ones too -- read
     // against any part of it.
     dim_at = approach(dim_at, page == PAGE_SETTINGS ? 0.42f : 0.0f, 10.0f, dt);
-    SDL_SetRenderDrawColorFloat(renderer, 0, 0, 0, ((wallpaper ? 0.15f : 0.35f) + dim_at) * fade);
+    SDL_SetRenderDrawColorFloat(renderer, 0, 0, 0,
+                                ((wallpaper && !wallpaper_is_scene ? 0.15f : 0.35f) + dim_at) * fade);
     SDL_RenderFillRect(renderer, NULL);
     gradient(0, 0, W * 0.68f, (float)H, (SDL_FColor){ 0.02f, 0.01f, 0.01f, 0.92f * fade },
              (SDL_FColor){ 0, 0, 0, 0 }, 0);
@@ -1432,4 +1472,33 @@ void albw_prompt_draw(void) {
     text(&f_small, x0, hy, "Type it, or pick keys: A types, B deletes, X shifts, Y is a space.", grey, 0.85f);
     snprintf(hint, sizeof hint, "Enter or Start confirms. Esc keeps \"%s\".", offered);
     text(&f_small, x0, hy + H * 0.032f, hint, grey, 0.85f);
+}
+
+// ---------------------------------------------------------------------------------------------
+// The backdrop: the top screen as the game was left, kept in the cache for the menu's next start.
+// Made from the player's own game, on their machine, and kept there.
+void albw_launcher_keep_backdrop(SDL_Surface *shot) {
+#if HAVE_STB_WRITE
+    if (!shot) return;
+    SDL_Surface *rgb = SDL_ConvertSurface(shot, SDL_PIXELFORMAT_RGB24);
+    if (!rgb) return;
+    unsigned char *packed = malloc((size_t)rgb->w * (size_t)rgb->h * 3u);
+    if (packed) {
+        for (int y = 0; y < rgb->h; y++)
+            memcpy(packed + (size_t)y * rgb->w * 3, (unsigned char *)rgb->pixels + (size_t)y * rgb->pitch,
+                   (size_t)rgb->w * 3);
+        char root[500], path[600];
+        albw_cache_root(root, sizeof root);
+        albw_mkdir(root);
+        snprintf(path, sizeof path, "%s/backdrop.jpg", root);
+        char tmp[620];
+        snprintf(tmp, sizeof tmp, "%s.new", path);
+        if (stbi_write_jpg(tmp, rgb->w, rgb->h, 3, packed, 90) && albw_rename(tmp, path) == 0)
+            printf("[launch] kept the scene as the menu's backdrop (%dx%d)\n", rgb->w, rgb->h);
+        free(packed);
+    }
+    SDL_DestroySurface(rgb);
+#else
+    (void)shot;
+#endif
 }

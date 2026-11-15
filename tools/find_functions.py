@@ -377,6 +377,72 @@ def image_words(code, text_end, ro, data):
     return out
 
 
+def read_addresses(path):
+    """Addresses, one in hex a line (a Thumb one with its low bit set); none if there is no file."""
+    try:
+        lines = open(path).read().splitlines()
+    except FileNotFoundError:
+        return []
+    return [int(x, 16) for x in lines if x.strip() and not x.startswith('#')]
+
+
+def carry_over(own_starts, base_starts, base_entries, k=8):
+    """Another release's entry points, carried over to this one.
+
+    The releases are the same program built apart, so their code is laid out alike but not at the
+    same addresses: a stretch moves by however much the code before it grew or shrank. Both sides'
+    statically found starts (with the Thumb bit) show where: the gaps between them run alike, and
+    where k gaps in a row are alike and found nowhere else on either side, the stretch is the same,
+    and its shift is known. An entry point of the other release is carried over by the shift of
+    such a stretch nearby -- if the starts either side of it are there in this release too, moved by
+    exactly as much. Returns the carried-over entry points, and how many could not be.
+    """
+    def gaps(seq):
+        return [(seq[i + 1] - seq[i], seq[i] & 1) for i in range(len(seq) - 1)]
+
+    def grams(g):
+        seen = {}
+        for i in range(len(g) - k + 1):
+            key = tuple(g[i:i + k])
+            seen[key] = -1 if key in seen else i
+        return seen
+
+    a, b = sorted(base_starts), sorted(own_starts)
+    ga, gb = grams(gaps(a)), grams(gaps(b))
+    anchors = sorted((a[i], b[j] - a[i]) for key, i in ga.items() if i >= 0
+                     for j in [gb.get(key, -1)] if j >= 0)
+    if not anchors:
+        return [], len(base_entries)
+    anchor_at = [x for x, _ in anchors]
+    own = set(b)
+    out, missed = [], 0
+    for e in base_entries:
+        addr = e & ~1
+        i = bisect.bisect_right(a, addr) - 1
+        if i < 0 or i + 1 >= len(a):
+            missed += 1
+            continue
+        before, after = a[i], a[i + 1]
+        # The shifts of the stretches nearest it, nearest first.
+        j = bisect.bisect_left(anchor_at, addr)
+        tried, found = set(), None
+        for step in range(64):
+            for m in (j - 1 - step, j + step):
+                if 0 <= m < len(anchors) and anchors[m][1] not in tried:
+                    d = anchors[m][1]
+                    tried.add(d)
+                    if before + d in own and after + d in own:
+                        found = d
+                        break
+            if found is not None:
+                break
+        if found is None:
+            missed += 1
+        else:
+            out.append(e + found)
+    return out, missed
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--bin', default='rom-extract/code.bin')
@@ -386,6 +452,9 @@ def main():
                          "card's product code, which tools/extract_rom.py records)")
     ap.add_argument('--out', default='rom-extract/functions.tsv')
     ap.add_argument('--compare', help='a Ghidra functions.tsv to compare the result with')
+    ap.add_argument('--starts', help='write the starts found without any entry points to this file '
+                                     '(entries/<product>.starts, what another release carries this '
+                                     "one's entry points over by)")
     a = ap.parse_args()
     t0 = time.time()
 
@@ -396,6 +465,8 @@ def main():
 
     f.add(text[0], 0, 'entry')
     known = a.known
+    if a.starts:
+        known = []                                       # the code's own starts, nothing else
     if known is None:
         # The addresses are one release's: another release's code is laid out differently, and
         # its addresses would be noise. So each release has a file of its own, by product code.
@@ -406,6 +477,7 @@ def main():
             print('no product code beside the code (run tools/extract_rom.py again); '
                   'going without the entry points play has found')
             known = []
+    own_entries = 0
     for path in known:
         try:
             lines = open(path).read().splitlines()
@@ -415,8 +487,18 @@ def main():
         for line in lines:
             if line.strip() and not line.startswith('#'):
                 w = int(line, 16)
-                f.add(w & ~1, w & 1, 'discovered')
+                own_entries += f.add(w & ~1, w & 1, 'discovered')
     cands = image_words(code, text_end, ro, data)
+
+    # A release with few entry points of its own takes another's, carried over (carry_over) once its
+    # own static starts are known: entries/<product>.starts beside entries/<product>.txt are what a
+    # release ships for that.
+    bases = []
+    if a.known is None and not a.starts and own_entries < 64:
+        for name in sorted(os.listdir('entries')) if os.path.isdir('entries') else []:
+            if name.endswith('.starts') and os.path.exists(os.path.join('entries', name[:-7] + '.txt')):
+                bases.append(name[:-7])
+    carried = False
 
     rounds = 0
     while True:
@@ -451,6 +533,25 @@ def main():
               f'changed, {len(f.starts)} functions ({time.time() - t0:.0f} s)')
         if not by_words and not changed:
             more = f.close()
+            if not more and bases and not carried:
+                # This release's own starts are all found: now the other release's entry points,
+                # and the search once more from the start with them, as if they had been known all
+                # along -- where an entry point splits a body decides which words count as
+                # pointers, so they are not to come late.
+                carried = True
+                static = [x | t for x, (t, kind) in f.starts.items() if kind != 'discovered']
+                found = [w for w, (t, kind) in ((x | t, v) for x, v in f.starts.items())
+                         if kind == 'discovered']
+                for base in bases:
+                    entries, missed = carry_over(static, read_addresses(f'entries/{base}.starts'),
+                                                 read_addresses(f'entries/{base}.txt'))
+                    found += entries
+                    print(f'carried over {len(entries)} of {base}\'s entry points ({missed} not placed)')
+                f = Finder(code, text_end)
+                f.add(text[0], 0, 'entry')
+                for w in sorted(set(found)):
+                    f.add(w & ~1, w & 1, 'discovered')
+                continue
             if not more:
                 break
 
@@ -486,6 +587,11 @@ def main():
             rs = ';'.join(f'{lo:08X}-{hi:08X}' for lo, hi in ranges)
             fh.write(f'{addr:08X}\t{end:08X}\t{size}\t{thumb}\t0\t0\t{rs}\t{kind}_{addr:08x}\n')
     print(f'written to {a.out}')
+    if a.starts:
+        with open(a.starts, 'w') as fh:
+            for addr in sorted(f.starts):
+                fh.write(f'{addr | f.starts[addr][0]:08X}\n')
+        print(f'{len(f.starts)} starts written to {a.starts}')
 
     if a.compare:
         G = R.load_functions(a.compare)

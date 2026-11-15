@@ -118,7 +118,7 @@ strip -o "$appdir/usr/bin/world-across" "$exe"
 kit="$appdir/usr/share/world-across/kit"
 mkdir -p "$kit/tools" "$kit/entries" "$kit/include" "$kit/glue"
 cp "$root/tools/extract_rom.py" "$root/tools/find_functions.py" "$root/tools/recompile.py" "$kit/tools/"
-cp "$root"/entries/*.txt "$kit/entries/"
+cp "$root"/entries/*.txt "$root"/entries/*.starts "$kit/entries/"
 cp "$root/src/runtime/albw_cpu.h" "$root/src/runtime/albw_game.h" "$kit/include/"
 cp "$root/src/runtime/albw_game_glue.c" "$kit/glue/"
 
@@ -220,6 +220,10 @@ cp "$root/third_party/kit/GPL-3.0.txt" "$root/third_party/kit/LGPL-3.0.txt" \
 
 cp "$root/LICENSE" "$doc/LICENSE"
 cp "$root/third_party/fsr1/license.txt" "$doc/licences/FSR1-LICENSE.txt"
+# The menu's type, where the launcher looks for it in an AppImage.
+mkdir -p "$appdir/usr/share/world-across/fonts"
+cp "$root"/third_party/fonts/*.ttf "$appdir/usr/share/world-across/fonts/"
+cp "$root/third_party/fonts/OFL.txt" "$doc/licences/FiraSans-OFL.txt"
 ffx_licence="$root/external/fidelityfx-sdk-v1.1.4/sdk/LICENSE.txt"
 if grep -q 'FidelityFX SDK found' "$work/launcher-configure.log"; then
     cp "$ffx_licence" "$doc/licences/FidelityFX-SDK-LICENSE.txt"
@@ -233,6 +237,10 @@ World Across (usr/bin/world-across, the kit's tools, include and glue) -- MIT, .
 
 SDL 3.4.20 (built into world-across) -- zlib licence, SDL3-LICENSE.txt
     https://github.com/libsdl-org/SDL/releases/tag/release-3.4.20
+
+Fira Sans Condensed 4.301 (usr/share/world-across/fonts) -- SIL Open Font License 1.1,
+FiraSans-OFL.txt
+    https://github.com/bBoxType/FiraSans
 
 AMD FidelityFX Super Resolution 1 and the FidelityFX SDK 1.1.4 (FSR 3), built into world-across --
 MIT, FSR1-LICENSE.txt and FidelityFX-SDK-LICENSE.txt

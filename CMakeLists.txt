@@ -73,6 +73,7 @@ if(WIN32)
     # stb is headers alone: a cross build takes the host's, copied where only they are found.
     if(CMAKE_CROSSCOMPILING AND EXISTS /usr/include/stb/stb_truetype.h)
         file(COPY /usr/include/stb/stb_truetype.h /usr/include/stb/stb_image.h
+                  /usr/include/stb/stb_image_write.h
              DESTINATION ${CMAKE_BINARY_DIR}/host-include/stb)
         target_include_directories(albw_player SYSTEM INTERFACE ${CMAKE_BINARY_DIR}/host-include)
     endif()

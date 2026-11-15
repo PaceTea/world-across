@@ -66,6 +66,8 @@ static uint8_t cpu_source[2][TOP_W * 240 * 3];
 static int cpu_sharpness[2] = { -1, -1 };
 static int cpu_valid[2];
 
+static int gpu_rendering(void);
+
 int albw_window_offers(int setting, int choice, const char **why) {
     const char *reason = NULL;
     switch (setting) {
@@ -87,10 +89,12 @@ int albw_window_offers(int setting, int choice, const char **why) {
             if (choice == ALBW_UPSCALE_DLSS) albw_dlss_available(&reason);
             break;
         case ALBW_SET_FRAME_RATE:
-            if (choice != ALBW_RATE_CONSOLE
+            // With the GPU renderer every frame shown goes through the upscaler; the processor's
+            // path upscales the game's own 60.
+            if (choice != ALBW_RATE_CONSOLE && !gpu_rendering()
                     && (albw_settings()->upscale == ALBW_UPSCALE_FSR3 || albw_settings()->upscale == ALBW_UPSCALE_DLSS)
                     && albw_window_offers(ALBW_SET_UPSCALE, albw_settings()->upscale, NULL))
-                reason = "Not with FSR 3 or DLSS yet: they upscale the game's own 60 frames.";
+                reason = "With FSR 3 or DLSS, for the GPU renderer: the processor's path upscales 60 frames.";
             break;
         case ALBW_SET_RENDERER:
             if (choice == ALBW_RENDERER_GPU && !gpu_ok)
@@ -441,7 +445,8 @@ static int gpu_draw(float t) {
 // FSR 3 or DLSS on the GPU renderer's picture: the top screen drawn below the size it is shown at
 // -- the resolution setting's multiple, or two thirds of the window's -- jittered, with its depth,
 // motion and reactive mask, and upscaled to the window's pixels exactly; the bottom screen drawn
-// as always. Each new frame of the game's once.
+// as always. Each new frame of the game's once -- and, with frames in between, each of those too,
+// its motion measured from the one shown before it.
 static SDL_Texture *gpu_up_view;
 static SDL_GPUTexture *gpu_up_of;
 static int gpu_up_w, gpu_up_h;
@@ -450,12 +455,19 @@ static size_t gpu_up_room;
 static uint32_t gpu_up_index;
 static uint64_t gpu_up_last_ns;
 
-static int gpu_temporal_steps(void);
+static unsigned long gpu_up_later;                       // the frame shown last: its records' later
+static float gpu_up_t;                                   // and how far towards it
+static unsigned gpu_up_restarts, gpu_up_skips;           // for ALBW_FPS: history thrown away; frames
+                                                         // of the game's the window never showed
+
+static int gpu_temporal_steps(float t, int held, unsigned long later);
 static uint64_t gpu_up_spent[3];                         // waiting + showing, drawing, making
 
-static int gpu_temporal_draw(void) {
+// The frame `t` of the way between the held records (with `held`; else the game's latest frame,
+// held here), drawn for the upscaler. Lets the records go either way.
+static int gpu_temporal_draw(float t, int held, unsigned long later) {
     uint64_t t0 = SDL_GetTicksNS();
-    int ok = gpu_temporal_steps();
+    int ok = gpu_temporal_steps(t, held, later);
     uint64_t spent = SDL_GetTicksNS() - t0;
     if (ok) {
         gpu_ns += spent;
@@ -512,14 +524,17 @@ static int up_settle(int *ok, int *slot, int *w, int *h) {
     return had;
 }
 
-static int gpu_temporal_steps(void) {
+static int gpu_temporal_steps(float t_draw, int held, unsigned long held_later) {
 #ifdef ALBW_HAVE_GPU
     int up = upscaler();
     SDL_FRect top, bottom;
     screens_in_pixels(&top, &bottom);
     set_presentation();
     int sw = (int)top.w, sh = (int)top.h;                // the top screen as shown
-    if (sw < TOP_W || sh < SCREEN_H) return 0;
+    if (sw < TOP_W || sh < SCREEN_H) {
+        if (held) albw_raster_between_release();
+        return 0;
+    }
     int r = albw_settings()->resolution;
     int scale = r > 0 && r < ALBW_RESOLUTIONS ? r : (int)lroundf((float)sh / SCREEN_H / 1.5f);
     // DLSS goes to three times its input at most; FSR 3 is made for the same.
@@ -540,7 +555,7 @@ static int gpu_temporal_steps(void) {
         gpu_up_ok = 0;
         SDL_GPUTexture *shown = NULL;
         if (done_ok && done_w == out_w && done_h == out_h) {
-            shown = albw_gpu_show_upscaled(gpu_up_pixels, out_w, out_h, 1);
+            shown = albw_gpu_show_upscaled(gpu_up_pixels, out_w, out_h, 1, done_slot);
         }
         if (shown && (!gpu_up_view || gpu_up_of != shown || gpu_up_w != sw || gpu_up_h != sh)) {
             if (gpu_up_view) SDL_DestroyTexture(gpu_up_view);
@@ -564,14 +579,30 @@ static int gpu_temporal_steps(void) {
     }
     uint64_t m1 = SDL_GetTicksNS();
 
-    // This frame, drawn for the upscaler and handed to its thread.
-    unsigned long later;
-    if (!albw_raster_between_hold(&later)) return gpu_up_ok;
+    // This frame, drawn for the upscaler and handed to its thread. Its motion is from the frame
+    // shown before: further along the same two records, or -- the game having moved on by one --
+    // the same place, a frame further back.
+    unsigned long later = held_later;
+    if (!held && !albw_raster_between_hold(&later)) return gpu_up_ok;
+    // A frame of the game's the window did not get to show is no reason to start over: the
+    // upscaler's history would be thrown away again and again, and what it shows would shake with
+    // the jitter. Only a cut, or the first frame, does that.
+    int restart = !gpu_up_index || later < gpu_up_later;
+    float prev_t = 0.0f;
+    if (gpu_up_index && later > gpu_up_later + 1) gpu_up_skips += (unsigned)(later - gpu_up_later - 1);
+    if (!restart) {
+        prev_t = gpu_up_t - (float)(later - gpu_up_later);
+        if (prev_t < -1.0f) prev_t = -1.0f;
+    }
     gpu_frame.want_prev = 1;
-    int ok = albw_raster_gpu_frame(&gpu_frame, 1.0f);
+    gpu_frame.prev_t = restart ? 0.0f : prev_t;
+    int ok = albw_raster_gpu_frame(&gpu_frame, t_draw);
     gpu_frame.want_prev = 0;
+    gpu_frame.prev_t = 0.0f;
     albw_raster_between_release();
     if (!ok) return gpu_up_ok;
+    gpu_up_later = later;
+    gpu_up_t = gpu_frame.cut ? 1.0f : t_draw;
     struct albw_gpu_temporal t;
     memset(&t, 0, sizeof t);
     albw_vkup_jitter(gpu_up_index, in_h, out_h, &t.jitter[0], &t.jitter[1]);
@@ -604,7 +635,8 @@ static int gpu_temporal_steps(void) {
     pthread_mutex_lock(&up_mutex);
     up_job.in = (struct albw_vkup_frame){
         in_w, in_h, NULL, t.rgba, t.depth, t.motion, t.reactive, t.jitter[0], t.jitter[1],
-        gpu_frame.cut || !gpu_up_index, sharp[albw_settings()->sharpness],
+        (gpu_up_restarts += gpu_frame.cut || restart, gpu_frame.cut || restart),
+        sharp[albw_settings()->sharpness],
         gpu_up_last_ns ? (float)(now - gpu_up_last_ns) * 1e-6f : 16.7f, 1.0f, 1000.0f, 0.6f, 1,
     };
     up_job.dlss = up == ALBW_UPSCALE_DLSS;
@@ -1031,61 +1063,43 @@ const struct albw_input *albw_window_input(void) { return game_threaded ? &game_
 // ---------------------------------------------------------------------------------------------
 // Input.
 
-// The touch screen from a gamepad (the Touch Screen Controls setting). A finger on a touchpad -- a
-// DualShock 4's, a DualSense's, either of the Steam Controller's -- shows a small ring on the bottom
-// screen, the whole pad standing for the whole screen, and pressing the pad in touches there.
-// Without a touchpad, the right stick pressed in shows the ring in the middle and the gyroscope
-// moves it; pressed in again it touches, held it drags, and let go the ring is gone. The ring never
-// leaves the screen. The mouse works whatever the setting.
+// The touch screen from a gamepad (the Touch Screen Controls setting). A small ring on the bottom
+// screen is where a touch lands, and it never leaves the screen. A finger on a touchpad -- a
+// DualShock 4's, a DualSense's, either of the Steam Controller's -- puts it where the finger is,
+// the whole pad standing for the whole screen, and pressing the pad in touches. The right stick,
+// which the console never had, pushes it about; the gyroscope, after the stick is pressed in,
+// steers it. Pressed in while the ring is up, the stick touches -- held, it drags; after the
+// gyroscope's aiming the ring goes when it is let go, after the stick's it fades once the stick has
+// been left alone a while. The mouse works whatever the setting.
 static struct {
     float x, y;                                          // in the bottom screen's pixels
     int shown, touching;
-    int gyro;                                            // 0 off, 1 aiming, 2 touching (stick held)
-    int stick_was;                                       // the right stick's button, last frame
+    int gyro;                                            // the gyroscope is steering
+    int pressing;                                        // the stick's button is touching
+    int stick_was;                                       // the stick's button, last frame
+    uint64_t moved_ns;                                   // the stick last pushed the ring
     uint64_t last_ns;
 } ring;
 #define GYRO_PIXELS_PER_RADIAN 450.0f                    // a turn of 40 degrees crosses the screen
 #define GYRO_STILL 0.02f                                 // rad/s: below it, a hand's tremor
+#define STICK_PIXELS_PER_SECOND 420.0f                   // at full tilt: the screen in under a second
+#define STICK_DEAD 0.18f
+#define STICK_LINGER_NS 2500000000ull                    // the stick's ring, left alone, then goes
 
-static void ring_update(int use_pad, int use_gyro, int finger, float fx, float fy, int click,
-                        int stick, int have_gyro, const float gyro[3]) {
+static void ring_update(int use_pad, int use_gyro, int use_stick, int finger, float fx, float fy,
+                        int click, int stick, float sx, float sy, int have_gyro, const float gyro[3]) {
     uint64_t now = SDL_GetTicksNS();
     float dt = ring.last_ns ? (float)(now - ring.last_ns) / 1e9f : 0.0f;
     if (dt > 0.05f) dt = 0.05f;
     ring.last_ns = now;
     int pressed = stick && !ring.stick_was, released = !stick && ring.stick_was;
     ring.stick_was = stick;
-    if (rect_bottom.w <= 0 || albw_launcher_visible()) {
-        ring.shown = ring.touching = ring.gyro = 0;
+    if (rect_bottom.w <= 0 || albw_launcher_visible() || albw_prompt_visible()) {
+        ring.shown = ring.touching = ring.gyro = ring.pressing = 0;
+        ring.moved_ns = 0;
         return;
-    }
-    if (use_gyro && have_gyro) {
-        if (ring.gyro == 0 && pressed) {
-            ring.gyro = 1;
-            if (!ring.shown) {
-                ring.x = BOTTOM_W / 2.0f;
-                ring.y = SCREEN_H / 2.0f;
-            }
-        } else if (ring.gyro == 1 && pressed) {
-            ring.gyro = 2;
-        } else if (ring.gyro == 2 && released) {
-            ring.gyro = 0;
-        }
-        if (ring.gyro) {
-            // Turning the pad left moves the ring left; tipping its front up moves it up.
-            float yaw = fabsf(gyro[1]) > GYRO_STILL ? gyro[1] : 0.0f;
-            float pitch = fabsf(gyro[0]) > GYRO_STILL ? gyro[0] : 0.0f;
-            ring.x -= yaw * GYRO_PIXELS_PER_RADIAN * dt;
-            ring.y -= pitch * GYRO_PIXELS_PER_RADIAN * dt;
-        }
-    } else {
-        ring.gyro = 0;
     }
     finger = finger && use_pad;
-    if (albw_prompt_visible()) {
-        ring.shown = ring.touching = ring.gyro = 0;
-        return;
-    }
     // ALBW_RING=<x>,<y> holds a finger there, for screenshots of the ring.
     static int test_ring = -1;
     static float test_x, test_y;
@@ -1095,14 +1109,64 @@ static void ring_update(int use_pad, int use_gyro, int finger, float fx, float f
         fx = test_x / BOTTOM_W;
         fy = test_y / SCREEN_H;
     }
+    if (!use_gyro || !have_gyro) ring.gyro = 0;
+
+    // The stick pushes the ring, the faster the further it is tilted; a slight tilt is for aiming.
+    float mag = sqrtf(sx * sx + sy * sy);
+    if (use_stick && mag > STICK_DEAD) {
+        if (!ring.shown) {
+            if (!ring.moved_ns && !ring.gyro) {          // first time up: the middle
+                ring.x = BOTTOM_W / 2.0f;
+                ring.y = SCREEN_H / 2.0f;
+            }
+        }
+        float t = fminf((mag - STICK_DEAD) / (1.0f - STICK_DEAD), 1.0f);
+        float speed = STICK_PIXELS_PER_SECOND * t * t / mag;
+        ring.x += sx * speed * dt;
+        ring.y += sy * speed * dt;
+        ring.moved_ns = now;
+    }
+    int stick_up = use_stick && ring.moved_ns && now - ring.moved_ns < STICK_LINGER_NS;
+    int up = finger || ring.gyro || stick_up || ring.pressing;
+
+    // The stick's button: a touch while the ring is up, else the ring brought up.
+    if (pressed) {
+        if (up) {
+            ring.pressing = 1;
+        } else if (use_gyro && have_gyro) {
+            ring.gyro = 1;
+            if (!ring.moved_ns) {
+                ring.x = BOTTOM_W / 2.0f;
+                ring.y = SCREEN_H / 2.0f;
+            }
+        } else if (use_stick) {
+            if (!ring.moved_ns) {
+                ring.x = BOTTOM_W / 2.0f;
+                ring.y = SCREEN_H / 2.0f;
+            }
+            ring.moved_ns = now;
+        }
+    } else if (released && ring.pressing) {
+        ring.pressing = 0;
+        ring.gyro = 0;                                   // the gyroscope's aim is done with the touch
+        if (ring.moved_ns) ring.moved_ns = now;          // the stick's ring lingers from here
+    }
+    if (ring.gyro) {
+        // Turning the pad left moves the ring left; tipping its front up moves it up.
+        float yaw = fabsf(gyro[1]) > GYRO_STILL ? gyro[1] : 0.0f;
+        float pitch = fabsf(gyro[0]) > GYRO_STILL ? gyro[0] : 0.0f;
+        ring.x -= yaw * GYRO_PIXELS_PER_RADIAN * dt;
+        ring.y -= pitch * GYRO_PIXELS_PER_RADIAN * dt;
+    }
     if (finger) {
         ring.x = fx * BOTTOM_W;
         ring.y = fy * SCREEN_H;
     }
     ring.x = fminf(fmaxf(ring.x, 0.0f), BOTTOM_W - 1.0f);
     ring.y = fminf(fmaxf(ring.y, 0.0f), SCREEN_H - 1.0f);
-    ring.shown = finger || ring.gyro;
-    ring.touching = ring.shown && ((click && use_pad) || ring.gyro == 2);
+    stick_up = use_stick && ring.moved_ns && now - ring.moved_ns < STICK_LINGER_NS;
+    ring.shown = finger || ring.gyro || stick_up || ring.pressing;
+    ring.touching = ring.shown && ((click && use_pad && finger) || ring.pressing);
 }
 
 // The ring, over the bottom screen: a faint disc with a brighter edge, brighter still while it
@@ -1168,10 +1232,11 @@ static void read_input(void) {
     // ALBW_GAMEPADS=0 leaves them all out, for a pad lying on the desk that the game would
     // otherwise hear.
     int touch_mode = albw_settings()->touch_controls;
-    int use_pad = touch_mode == ALBW_TOUCH_TOUCHPAD || touch_mode == ALBW_TOUCH_BOTH;
-    int use_gyro = touch_mode == ALBW_TOUCH_GYRO || touch_mode == ALBW_TOUCH_BOTH;
+    int use_pad = touch_mode == ALBW_TOUCH_TOUCHPAD || touch_mode == ALBW_TOUCH_ALL;
+    int use_gyro = touch_mode == ALBW_TOUCH_GYRO || touch_mode == ALBW_TOUCH_ALL;
+    int use_stick = touch_mode == ALBW_TOUCH_STICK || touch_mode == ALBW_TOUCH_ALL;
     int finger = 0, click = 0, stick = 0, have_gyro = 0;
-    float fx = 0.0f, fy = 0.0f, gyro[3] = { 0.0f, 0.0f, 0.0f };
+    float fx = 0.0f, fy = 0.0f, gyro[3] = { 0.0f, 0.0f, 0.0f }, rsx = 0.0f, rsy = 0.0f;
     int count = 0;
     SDL_JoystickID *ids = pads_wanted ? SDL_GetGamepads(&count) : NULL;
     for (int i = 0; ids && i < count; i++) {
@@ -1219,6 +1284,13 @@ static void read_input(void) {
         if (pads > 0 && SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_TOUCHPAD)) click = 1;
         if (pads > 1 && SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_MISC2)) click = 1;
         if (SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_RIGHT_STICK)) stick = 1;
+        // The right stick: the pad tilted furthest is the one that counts.
+        float rx = SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_RIGHTX) / 32767.0f;
+        float ry = SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_RIGHTY) / 32767.0f;
+        if (rx * rx + ry * ry > rsx * rsx + rsy * rsy) {
+            rsx = rx;
+            rsy = ry;
+        }
         if (use_gyro && SDL_GamepadHasSensor(pad, SDL_SENSOR_GYRO)) {
             if (!SDL_GamepadSensorEnabled(pad, SDL_SENSOR_GYRO))
                 SDL_SetGamepadSensorEnabled(pad, SDL_SENSOR_GYRO, true);
@@ -1253,7 +1325,7 @@ static void read_input(void) {
     if (in.circle_y < -40) in.buttons |= ALBW_PAD_CIRCLE_DOWN;
 
     // The gamepad's ring touches where it is; the mouse, pressed on the bottom screen, wins.
-    ring_update(use_pad, use_gyro, finger, fx, fy, click, stick, have_gyro, gyro);
+    ring_update(use_pad, use_gyro, use_stick, finger, fx, fy, click, stick, rsx, rsy, have_gyro, gyro);
     if (ring.touching) {
         in.touching = 1;
         in.touch_x = (uint16_t)ring.x;
@@ -1307,8 +1379,11 @@ static void count_show(int between) {
                    (double)gpu_ns / gpu_draws / 1e6, (double)gpu_most_ns / 1e6);
             if (gpu_up_spent[1]) {
                 printf(" -- waiting for the upscaler and showing it %.2f, making the frame %.2f, drawing "
-                       "and reading back %.2f", (double)gpu_up_spent[0] / gpu_draws / 1e6,
-                       (double)gpu_up_spent[2] / gpu_draws / 1e6, (double)gpu_up_spent[1] / gpu_draws / 1e6);
+                       "and reading back %.2f; the upscaler started over %u times, %u of the game's "
+                       "frames skipped", (double)gpu_up_spent[0] / gpu_draws / 1e6,
+                       (double)gpu_up_spent[2] / gpu_draws / 1e6, (double)gpu_up_spent[1] / gpu_draws / 1e6,
+                       gpu_up_restarts, gpu_up_skips);
+                gpu_up_restarts = gpu_up_skips = 0;
             }
             memset(gpu_up_spent, 0, sizeof gpu_up_spent);
         }
@@ -1320,9 +1395,8 @@ static void count_show(int between) {
     shows_since = now;
 }
 
-static void show(void) {
-    if (tex_top) SDL_UpdateTexture(tex_top, NULL, rgb_top, TOP_W * 3);
-    if (tex_bottom) SDL_UpdateTexture(tex_bottom, NULL, rgb_bottom, BOTTOM_W * 3);
+// The two screens as the renderer and the upscaler have them, over black.
+static void draw_screens(void) {
     SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
     SDL_RenderClear(renderer);
     int up = upscaler();
@@ -1340,6 +1414,29 @@ static void show(void) {
         if (tex_top) SDL_RenderTexture(renderer, tex_top, NULL, &rect_top);
         if (tex_bottom && rect_bottom.w > 0) SDL_RenderTexture(renderer, tex_bottom, NULL, &rect_bottom);
     }
+}
+
+// On the way out: the top screen as the game was left, without the menu over it, kept as the
+// menu's backdrop for next time -- once the game has run two minutes, so that a start that went no
+// further than the title screen, whose logo would sit behind the menu's, keeps the one there was.
+static void keep_backdrop(void) {
+    if (albw_frame_count() < 2 * 60 * 60 || !tex_top) return;
+    draw_screens();
+    SDL_FRect top, bottom;
+    screens_in_pixels(&top, &bottom);
+    SDL_Rect r = { (int)top.x, (int)top.y, (int)top.w, (int)top.h };
+    if (r.w > 0 && r.h > 0) {
+        SDL_Surface *shot = SDL_RenderReadPixels(renderer, &r);
+        albw_launcher_keep_backdrop(shot);
+        if (shot) SDL_DestroySurface(shot);
+    }
+    set_presentation();
+}
+
+static void show(void) {
+    if (tex_top) SDL_UpdateTexture(tex_top, NULL, rgb_top, TOP_W * 3);
+    if (tex_bottom) SDL_UpdateTexture(tex_bottom, NULL, rgb_bottom, BOTTOM_W * 3);
+    draw_screens();
     draw_ring();
     if (!albw_launcher_visible() && albw_prompt_visible()) {
         SDL_SetRenderLogicalPresentation(renderer, 0, 0, SDL_LOGICAL_PRESENTATION_DISABLED);
@@ -1352,6 +1449,14 @@ static void show(void) {
         albw_launcher_draw(gpu_rendering() && gpu_has_picture && gpu_view[0] ? gpu_view[0] : tex_top);
         set_presentation();
     }
+    // ALBW_QUIT_AT=<frame> closes the window then, as the player would: for checking the way out.
+    static long quit_frame = -2;
+    if (quit_frame == -2) quit_frame = albw_env("ALBW_QUIT_AT") ? strtol(albw_env("ALBW_QUIT_AT"), NULL, 10) : -1;
+    if (quit_frame >= 0 && (long)shown_frame >= quit_frame) {
+        quit_frame = -1;
+        SDL_Event q = { .type = SDL_EVENT_QUIT };
+        SDL_PushEvent(&q);
+    }
     // ALBW_SCREENSHOT=<frame>:<file.bmp> keeps the whole window as it looked at that frame.
     static long shot_at = -2;
     static const char *shot_file;
@@ -1361,13 +1466,24 @@ static void show(void) {
         shot_file = e && strchr(e, ':') ? strchr(e, ':') + 1 : NULL;
     }
     // The first frame shown from that one on: a window that fell behind for a frame skips one.
-    if (shot_file && shot_at >= 0 && (long)shown_frame >= shot_at) {
-        shot_at = -1;
+    // ALBW_SCREENSHOTS=<n> keeps that many pictures shown one after another, frames in between
+    // among them, as <file>.<i>.bmp.
+    static int shots_left = -1, shot_index;
+    if (shots_left < 0) shots_left = albw_env("ALBW_SCREENSHOTS") ? atoi(albw_env("ALBW_SCREENSHOTS")) : 0;
+    if (shot_file && (shot_at == -3 || (shot_at >= 0 && (long)shown_frame >= shot_at))) {
         SDL_Surface *shot = SDL_RenderReadPixels(renderer, NULL);
         if (shot) {
-            SDL_SaveBMP(shot, shot_file);
+            if (shots_left > 0) {
+                char name[600];
+                snprintf(name, sizeof name, "%s.%d.bmp", shot_file, shot_index++);
+                SDL_SaveBMP(shot, name);
+            } else {
+                SDL_SaveBMP(shot, shot_file);
+            }
             SDL_DestroySurface(shot);
         }
+        shot_at = shots_left > 1 ? -3 : -1;
+        if (shots_left > 0) shots_left--;
     }
     SDL_RenderPresent(renderer);
 }
@@ -1595,6 +1711,7 @@ const char *albw_window_play(const char *(*run)(void)) {
             continue;
         }
         if (!handle_events()) {
+            keep_backdrop();
             quit_at = now;
             pthread_mutex_lock(&win_mutex);
             pub_quit = 1;
@@ -1639,14 +1756,20 @@ const char *albw_window_play(const char *(*run)(void)) {
         if (temporal(upscaler()) && fresh && !paused && !fast && !gpu_rendering()) fsr3_frame();
         // The GPU renderer draws each new frame of the game's as it comes -- for FSR 3 or DLSS
         // at the size they take, upscaled.
+        int rate = frame_rate();
+        int between_on = rate != ALBW_RATE_CONSOLE && !paused && !fast && !albw_launcher_visible();
         if (gpu_rendering() && fresh) {
-            if (!(temporal(upscaler()) && !paused && !fast && gpu_temporal_draw())) gpu_draw(1.0f);
+            // With frames in between and an upscaler, the frames in between below are what goes
+            // through it, the game's own among them.
+            int up_between = between_on && temporal(upscaler());
+            if (!up_between
+                    && !(temporal(upscaler()) && !paused && !fast && gpu_temporal_draw(1.0f, 0, 0)))
+                gpu_draw(1.0f);
         }
 
         // Frames in between, while the game is running and at its own pace, as many as it leaves
         // room for: no more often than its frame time divided among them.
-        int rate = frame_rate();
-        if (rate != ALBW_RATE_CONSOLE && !paused && !fast && !albw_launcher_visible()) {
+        if (between_on) {
             float most = rate == ALBW_RATE_DISPLAY ? display_hz() / 60.0f - 1.0f : 8.0f;
             // On the graphics card a frame in between costs the game nothing.
             if (gpu_rendering()) between_allowed = most;
@@ -1676,7 +1799,9 @@ const char *albw_window_play(const char *(*run)(void)) {
                     continue;
                 }
                 last_between = now;
-                if (gpu_rendering()) {
+                if (gpu_rendering() && temporal(upscaler())) {
+                    gpu_temporal_draw(t, 1, later);
+                } else if (gpu_rendering()) {
                     gpu_draw_held(t);
                 } else {
                     albw_raster_between_draw(t, rgb_top, rgb_bottom);

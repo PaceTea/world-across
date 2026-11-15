@@ -364,6 +364,8 @@ static uint64_t kit_identity(void) {
     for (int i = 0; releases[i]; i++) {
         snprintf(path, sizeof path, "%s/entries/%s.txt", kit, releases[i]);
         h = fnv_file(h, path);
+        snprintf(path, sizeof path, "%s/entries/%s.starts", kit, releases[i]);
+        h = fnv_file(h, path);
     }
     for (size_t k = 0; k < COMPILE_FLAGS; k++) h = fnv(h, compile_flags[k], strlen(compile_flags[k]) + 1);
     return fnv(h, MODULE_NAME, sizeof MODULE_NAME);
@@ -422,11 +424,16 @@ static int build(const char *card) {
         snprintf(to, sizeof to, "%s/%s", build_dir, copies[i][1]);
         if (!copy_file(from, to)) return fail("The package's %s could not be copied.", copies[i][0]);
     }
-    // The addresses the game is known to branch to, per release: all of them, the tools pick.
+    // The addresses the game is known to branch to, per release, and where its functions start:
+    // all of them, the tools pick -- a release without addresses of its own carries another's over
+    // by the starts of both (tools/find_functions.py).
     for (int i = 0; releases[i]; i++) {
-        snprintf(from, sizeof from, "%s/entries/%s.txt", kit, releases[i]);
-        snprintf(to, sizeof to, "%s/entries/%s.txt", build_dir, releases[i]);
-        if (exists(from)) copy_file(from, to);
+        static const char *const kinds[] = { "txt", "starts" };
+        for (int k = 0; k < 2; k++) {
+            snprintf(from, sizeof from, "%s/entries/%s.%s", kit, releases[i], kinds[k]);
+            snprintf(to, sizeof to, "%s/entries/%s.%s", build_dir, releases[i], kinds[k]);
+            if (exists(from)) copy_file(from, to);
+        }
     }
     // Python in its UTF-8 mode, writing the log as UTF-8 whatever the system's code page is, and
     // deaf to PYTHONHOME and PYTHONPATH, which could point the kit's Python at another's library.

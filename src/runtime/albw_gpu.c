@@ -31,7 +31,7 @@ static SDL_GPUShader *sh_vert, *sh_frag, *sh_blit_vert, *sh_blit_frag;
 static SDL_GPUTextureFormat depth_format;
 static SDL_GPUTexture *black;                            // 1x1, opaque: an unusable unit
 static SDL_GPUSampler *blit_sampler;
-static SDL_GPUGraphicsPipeline *blit_pipe;
+static SDL_GPUGraphicsPipeline *blit_pipe, *blit_over_pipe;
 static unsigned long frames_drawn;
 // Multisampling: the samples a target's pixel has, as asked for and as the card can do it.
 static int samples_wanted = 1, samples = 1;
@@ -50,7 +50,8 @@ static void say(const char *what) {
 // ---------------------------------------------------------------------------------------------
 // Pipelines, one per combination of the fixed-function state a draw asks for.
 struct pipe_key {
-    uint8_t aux;                                         // with the temporal upscaler's targets
+    uint8_t aux;                                         // 1: with the temporal upscaler's targets;
+                                                         // 2: onto its overlay (draw_frame)
     uint8_t samples, has_depth, blend, color_mask, keep_color, depth_test, depth_func, depth_write, cull;
     uint8_t stencil, stencil_func, stencil_fail, stencil_zfail, stencil_zpass;
     uint8_t stencil_in_mask, stencil_write_mask;
@@ -172,6 +173,9 @@ static SDL_GPUGraphicsPipeline *pipeline_for(const struct albw_gpu_draw *d, int 
         if (k.color_mask & 2u) mask |= SDL_GPU_COLORCOMPONENT_G;
         if (k.color_mask & 4u) mask |= SDL_GPU_COLORCOMPONENT_B;
     }
+    // Onto the overlay, alpha is what it covers: written, and blended as coverage -- left alone by
+    // an additive blend, which covers nothing.
+    if (k.aux == 2) mask |= SDL_GPU_COLORCOMPONENT_A;
     ct.blend_state.color_write_mask = mask;
     ct.blend_state.enable_color_write_mask = true;
     if (k.blend) {
@@ -184,6 +188,13 @@ static SDL_GPUGraphicsPipeline *pipeline_for(const struct albw_gpu_draw *d, int 
         ct.blend_state.dst_color_blendfactor = blend_factor(f >> 20, &ca);
         ct.blend_state.src_alpha_blendfactor = blend_factor(f >> 24, &ca);
         ct.blend_state.dst_alpha_blendfactor = blend_factor(f >> 28, &ca);
+        if (k.aux == 2) {
+            int additive = ((f >> 20) & 15u) == 1u;
+            ct.blend_state.alpha_blend_op = SDL_GPU_BLENDOP_ADD;
+            ct.blend_state.src_alpha_blendfactor = additive ? SDL_GPU_BLENDFACTOR_ZERO : SDL_GPU_BLENDFACTOR_ONE;
+            ct.blend_state.dst_alpha_blendfactor = additive ? SDL_GPU_BLENDFACTOR_ONE
+                                                            : SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
+        }
     }
 
     SDL_GPUGraphicsPipelineCreateInfo ci;
@@ -236,10 +247,16 @@ static SDL_GPUGraphicsPipeline *pipeline_for(const struct albw_gpu_draw *d, int 
     cts[3].format = REACTIVE_FORMAT;
     cts[3].blend_state.enable_color_write_mask = true;
     cts[3].blend_state.color_write_mask = SDL_GPU_COLORCOMPONENT_R;
-    ci.target_info.color_target_descriptions = k.aux ? cts : &ct;
-    ci.target_info.num_color_targets = k.aux ? 4 : 1;
+    ci.target_info.color_target_descriptions = k.aux == 1 ? cts : &ct;
+    ci.target_info.num_color_targets = k.aux == 1 ? 4 : 1;
     ci.target_info.depth_stencil_format = depth_format;
     ci.target_info.has_depth_stencil_target = k.has_depth != 0;
+    if (k.aux == 2) {                                    // the overlay has no depth or stencil
+        ci.target_info.has_depth_stencil_target = false;
+        ci.depth_stencil_state.enable_depth_test = false;
+        ci.depth_stencil_state.enable_depth_write = false;
+        ci.depth_stencil_state.enable_stencil_test = false;
+    }
     SDL_GPUGraphicsPipeline *p = SDL_CreateGPUGraphicsPipeline(dev, &ci);
     if (!p) {
         say("a pipeline");
@@ -729,7 +746,14 @@ int albw_gpu_open(SDL_GPUDevice *device) {
     ci.target_info.color_target_descriptions = &ct;
     ci.target_info.num_color_targets = 1;
     blit_pipe = SDL_CreateGPUGraphicsPipeline(dev, &ci);
-    if (!blit_sampler || !blit_pipe) {
+    // The same, laid over what is there as premultiplied colour: the upscaler's overlay.
+    ct.blend_state.enable_blend = true;
+    ct.blend_state.color_blend_op = ct.blend_state.alpha_blend_op = SDL_GPU_BLENDOP_ADD;
+    ct.blend_state.src_color_blendfactor = ct.blend_state.src_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
+    ct.blend_state.dst_color_blendfactor = ct.blend_state.dst_alpha_blendfactor
+        = SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
+    blit_over_pipe = SDL_CreateGPUGraphicsPipeline(dev, &ci);
+    if (!blit_sampler || !blit_pipe || !blit_over_pipe) {
         say("the screens' copy");
         dev = NULL;
         return 0;
@@ -924,6 +948,12 @@ static void fill_to_clear(struct surface *s, const struct albw_gpu_event *e) {
 static struct albw_gpu_temporal *temporal;              // the frame being drawn wants it
 static SDL_GPUTexture *aux_tex[3], *capture_tex;
 static uint32_t aux_w, aux_h;
+// What lies over the top screen's scenery -- text boxes, the HUD -- drawn apart for the upscaler,
+// one for each read-back slot, and laid over its picture once upscaled (albw_gpu_show_upscaled):
+// it has no part in the history the upscaler builds, and is neither jittered nor smeared.
+static SDL_GPUTexture *overlay_tex[2];
+static uint32_t overlay_w, overlay_h;
+static int overlay_used[2];
 // Two read-back buffers, taken in turn, so that one frame's can be read while the next is drawn.
 static SDL_GPUTransferBuffer *readbacks[2];
 static uint32_t readback_sizes[2];
@@ -955,7 +985,41 @@ static void temporal_release(void) {
     }
     if (capture_tex) SDL_ReleaseGPUTexture(dev, capture_tex);
     capture_tex = NULL;
+    for (int i = 0; i < 2; i++) {
+        if (overlay_tex[i]) SDL_ReleaseGPUTexture(dev, overlay_tex[i]);
+        overlay_tex[i] = NULL;
+        overlay_used[i] = 0;
+    }
+    overlay_w = overlay_h = 0;
     aux_w = aux_h = 0;
+}
+
+static int overlay_targets(uint32_t w, uint32_t h) {
+    if (overlay_tex[0] && overlay_tex[1] && overlay_w == w && overlay_h == h) return 1;
+    for (int i = 0; i < 2; i++) {
+        if (overlay_tex[i]) SDL_ReleaseGPUTexture(dev, overlay_tex[i]);
+        overlay_tex[i] = NULL;
+        overlay_used[i] = 0;
+    }
+    SDL_GPUTextureCreateInfo ci;
+    SDL_zero(ci);
+    ci.type = SDL_GPU_TEXTURETYPE_2D;
+    ci.format = COLOR_FORMAT;
+    ci.usage = SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER;
+    ci.width = w;
+    ci.height = h;
+    ci.layer_count_or_depth = 1;
+    ci.num_levels = 1;
+    for (int i = 0; i < 2; i++) {
+        overlay_tex[i] = SDL_CreateGPUTexture(dev, &ci);
+        if (!overlay_tex[i]) {
+            say("the upscaler's overlay");
+            return 0;
+        }
+    }
+    overlay_w = w;
+    overlay_h = h;
+    return 1;
 }
 
 static int temporal_targets(uint32_t w, uint32_t h) {
@@ -1192,9 +1256,20 @@ static int draw_frame(const struct albw_gpu_frame *f, int scale, SDL_GPUTexture 
     uint32_t blend_constant = 0xFFFFFFFFu;
     int ref = -1;
     // For an upscaler: the top screen's target, whose draws up to its transfer are jittered and
-    // write the upscaler's targets as well.
+    // write the upscaler's targets as well -- all but what lies over the scenery: the draws that
+    // test no depth after the last one that does, which go onto the overlay instead.
     uint32_t top_base = temporal && f->screen_ev[0] >= 0 ? f->ev[f->screen_ev[0]].a : 0;
-    int pass_aux = 0, aux_fresh = 1, captured = 0;
+    int pass_aux = 0, aux_fresh = 1, captured = 0, overlay_fresh = 1;
+    int64_t last_scene = -1;
+    if (temporal) {
+        for (int32_t i = 0; i < f->screen_ev[0]; i++) {
+            const struct albw_gpu_event *e = &f->ev[i];
+            if (e->kind != ALBW_GPU_DRAW) continue;
+            const struct albw_gpu_draw *d = &f->draw[e->a];
+            if (d->color_base == top_base && d->depth_test) last_scene = i;
+        }
+        overlay_used[temporal->slot] = 0;
+    }
     for (uint32_t i = 0; i < f->ev_count; i++) {
         const struct albw_gpu_event *e = &f->ev[i];
         if (e->kind == ALBW_GPU_FILL) {
@@ -1217,6 +1292,23 @@ static int draw_frame(const struct albw_gpu_frame *f, int scale, SDL_GPUTexture 
             }
             struct surface *s = surface_holding(e->a);
             if (!s || !s->tex) continue;
+            if (temporal && which == 0 && aux_fresh && temporal_targets(s->width * (uint32_t)s->scale,
+                                                                        s->height * (uint32_t)s->scale)) {
+                // A frame with nothing of the scenery's: still, its motion, depth and reactive
+                // targets start over.
+                static const SDL_FColor clears[3] = { { 0, 0, 0, 0 }, { 1, 1, 1, 1 }, { 0, 0, 0, 0 } };
+                SDL_GPUColorTargetInfo cts[3];
+                for (int k = 0; k < 3; k++) {
+                    SDL_zero(cts[k]);
+                    cts[k].texture = aux_tex[k];
+                    cts[k].load_op = SDL_GPU_LOADOP_CLEAR;
+                    cts[k].clear_color = clears[k];
+                    cts[k].store_op = SDL_GPU_STOREOP_STORE;
+                }
+                SDL_GPURenderPass *cp = SDL_BeginGPURenderPass(cmd, cts, 3, NULL);
+                if (cp) SDL_EndGPURenderPass(cp);
+                aux_fresh = 0;
+            }
             if (temporal && which == 0 && temporal_targets(s->width * (uint32_t)s->scale,
                                                            s->height * (uint32_t)s->scale)) {
                 // The top screen's colour for the upscaler, before the bottom screen is drawn
@@ -1276,10 +1368,64 @@ static int draw_frame(const struct albw_gpu_frame *f, int scale, SDL_GPUTexture 
         if (sd) sd->used = frames_drawn;
         int aux = temporal && !captured && d->color_base == top_base
                && temporal_targets(sc->width * (uint32_t)sc->scale, sc->height * (uint32_t)sc->scale);
+        if (aux && !d->depth_test && (int64_t)i > last_scene
+                && overlay_targets(sc->width * (uint32_t)sc->scale, sc->height * (uint32_t)sc->scale)) {
+            aux = 2;
+        }
         if (pass && (pass_color != sc || pass_depth != sd || sc->clear || (sd && sd->clear)
                      || pass_aux != aux)) {
             SDL_EndGPURenderPass(pass);
             pass = NULL;
+        }
+        if (!pass && aux == 2 && (sc->clear || (sd && sd->clear))) {
+            // A clear the scenery's target still owes is done first, as an empty pass would.
+            SDL_GPUColorTargetInfo ct;
+            SDL_zero(ct);
+            ct.texture = sc->ms ? sc->ms : sc->tex;
+            ct.load_op = sc->clear ? SDL_GPU_LOADOP_CLEAR : SDL_GPU_LOADOP_LOAD;
+            ct.clear_color = sc->clear_color;
+            if (sc->ms) {
+                ct.resolve_texture = sc->tex;
+                ct.store_op = SDL_GPU_STOREOP_RESOLVE_AND_STORE;
+            } else {
+                ct.store_op = SDL_GPU_STOREOP_STORE;
+            }
+            SDL_GPUDepthStencilTargetInfo dt;
+            SDL_zero(dt);
+            if (sd && sd->tex) {
+                dt.texture = sd->tex;
+                dt.load_op = dt.stencil_load_op = sd->clear ? SDL_GPU_LOADOP_CLEAR : SDL_GPU_LOADOP_LOAD;
+                dt.clear_depth = sd->clear_depth;
+                dt.clear_stencil = sd->clear_stencil;
+                dt.store_op = dt.stencil_store_op = SDL_GPU_STOREOP_STORE;
+                sd->clear = 0;
+            }
+            sc->clear = 0;
+            SDL_GPURenderPass *cp = SDL_BeginGPURenderPass(cmd, &ct, 1, sd && sd->tex ? &dt : NULL);
+            if (cp) SDL_EndGPURenderPass(cp);
+        }
+        if (!pass && aux == 2) {
+            // The overlay: cleared to nothing the first time this frame, with no depth.
+            SDL_GPUColorTargetInfo ot;
+            SDL_zero(ot);
+            ot.texture = overlay_tex[temporal->slot];
+            ot.load_op = overlay_fresh ? SDL_GPU_LOADOP_CLEAR : SDL_GPU_LOADOP_LOAD;
+            ot.clear_color = (SDL_FColor){ 0, 0, 0, 0 };
+            ot.store_op = SDL_GPU_STOREOP_STORE;
+            overlay_fresh = 0;
+            overlay_used[temporal->slot] = 1;
+            pass = SDL_BeginGPURenderPass(cmd, &ot, 1, NULL);
+            if (!pass) continue;
+            pass_aux = aux;
+            pass_color = sc;
+            pass_depth = sd;
+            bound = NULL;
+            blend_constant = 0xFFFFFFFFu;
+            ref = -1;
+            SDL_GPUBufferBinding vb = { vbuf.buf, 0 };
+            SDL_BindGPUVertexBuffers(pass, 0, &vb, 1);
+            SDL_GPUBuffer *storage[2] = { sbuf.buf, lbuf.buf };
+            SDL_BindGPUFragmentStorageBuffers(pass, 0, storage, 2);
         }
         if (!pass) {
             SDL_GPUColorTargetInfo ct;
@@ -1343,7 +1489,9 @@ static int draw_frame(const struct albw_gpu_frame *f, int scale, SDL_GPUTexture 
             bound = p;
         }
         float sc_f = (float)scale;
-        float jx = aux ? temporal->jitter[0] : 0.0f, jy = aux ? temporal->jitter[1] : 0.0f;
+        // The jitter is for the scenery the upscaler builds up over frames; the overlay is drawn
+        // where it is.
+        float jx = aux == 1 ? temporal->jitter[0] : 0.0f, jy = aux == 1 ? temporal->jitter[1] : 0.0f;
         SDL_GPUViewport vp = { d->offset_x * sc_f + jx, d->offset_y * sc_f + jy, 2.0f * d->half_w * sc_f,
                                2.0f * d->half_h * sc_f, 0.0f, 1.0f };
         SDL_SetGPUViewport(pass, &vp);
@@ -1381,7 +1529,8 @@ static int draw_frame(const struct albw_gpu_frame *f, int scale, SDL_GPUTexture 
         struct draw_uniforms du;
         du.info[0] = d->state * ST_WORDS;
         du.info[1] = d->depth_test && (d->depth_func == 6 || d->depth_func == 7);
-        du.info[2] = du.info[3] = 0;
+        du.info[2] = aux == 2 && !d->blend;              // opaque onto the overlay
+        du.info[3] = 0;
         memcpy(du.uv, b->uv, sizeof du.uv);
         du.view[0] = d->half_w * sc_f;
         du.view[1] = d->half_h * sc_f;
@@ -1453,7 +1602,7 @@ static int upscaled_w, upscaled_h;
 static SDL_GPUTransferBuffer *upscaled_up;
 static uint32_t upscaled_up_size;
 
-SDL_GPUTexture *albw_gpu_show_upscaled(const void *pixels, int width, int height, int rgba) {
+SDL_GPUTexture *albw_gpu_show_upscaled(const void *pixels, int width, int height, int rgba, int slot) {
     if (!dev || width < 1 || height < 1) return NULL;
     static int upscaled_rgba = -1;
     if (!upscaled_in || upscaled_w != width || upscaled_h != height || upscaled_rgba != rgba) {
@@ -1521,6 +1670,17 @@ SDL_GPUTexture *albw_gpu_show_upscaled(const void *pixels, int width, int height
         SDL_BindGPUFragmentSamplers(bp, 0, &sb, 1);
         SDL_PushGPUFragmentUniformData(cmd, 0, &bu, sizeof bu);
         SDL_DrawGPUPrimitives(bp, 3, 1, 0, 0);
+        // What lay over the scenery when that frame was drawn, laid over it again now, turned the
+        // same way and scaled to it.
+        if (slot >= 0 && slot < 2 && overlay_used[slot] && overlay_tex[slot]) {
+            struct blit_uniforms ob = bu;
+            ob.size[2] = 1.0f;
+            SDL_BindGPUGraphicsPipeline(bp, blit_over_pipe);
+            SDL_GPUTextureSamplerBinding os = { overlay_tex[slot], blit_sampler };
+            SDL_BindGPUFragmentSamplers(bp, 0, &os, 1);
+            SDL_PushGPUFragmentUniformData(cmd, 0, &ob, sizeof ob);
+            SDL_DrawGPUPrimitives(bp, 3, 1, 0, 0);
+        }
         SDL_EndGPURenderPass(bp);
     }
     SDL_SubmitGPUCommandBuffer(cmd);

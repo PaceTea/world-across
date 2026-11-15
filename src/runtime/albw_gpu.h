@@ -61,6 +61,8 @@ struct albw_gpu_event {
 
 struct albw_gpu_frame {
     int want_prev;                  // asked for: each vertex's place in the frame before
+    float prev_t;                   // where that frame was, of the way from the earlier record to
+                                    // the later (0: the earlier itself; below 0, before it)
     unsigned long frame;            // the game's frame it shows
     struct albw_gpu_vertex *vert;
     uint32_t vert_count, vert_room;
@@ -126,8 +128,10 @@ void albw_gpu_temporal_done_slot(int slot);
 void albw_gpu_temporal_done(void);
 // An upscaled top screen, as the upscaler gave it back -- the target's orientation, `width` across
 // and `height` down, as 0xFFRRGGBB words or, with `rgba`, bytes red first -- turned the way the
-// screen shows it, into a texture `height` wide and `width` high.
-struct SDL_GPUTexture *albw_gpu_show_upscaled(const void *pixels, int width, int height, int rgba);
+// screen shows it, into a texture `height` wide and `width` high; with the overlay that frame's
+// read-back `slot` drew laid over it (-1 for none).
+struct SDL_GPUTexture *albw_gpu_show_upscaled(const void *pixels, int width, int height, int rgba,
+                                              int slot);
 void albw_gpu_close(void);
 // ALBW_GPU_TEST and ALBW_GPU_FSR3_TEST (albw_gpu.c), from the game's thread at a frame's end.
 void albw_gpu_test(unsigned long frame);

@@ -3420,18 +3420,21 @@ int albw_raster_gpu_frame(struct albw_gpu_frame *f, float t) {
             for (uint32_t k = 0; k < d->vertices; k++) lerp_vertex(&from[k], &v[k], t, &moved[k]);
             v = moved;
         }
-        // And where each was a frame before, for the upscaler: its counterpart's place, or, with
-        // none, where the scenery's move would have had it.
+        // And where each was in the frame shown before, for the upscaler: prev_t of the way from
+        // its counterpart to it -- the counterpart itself for a frame after the game's last -- or,
+        // with none, where the scenery's move over that span would have had it.
         const float (*pp)[4] = NULL;
         if (f->want_prev && GROW(prevpos, prevpos_room, d->vertices)) {
+            const struct vertex *at = cur->vert + d->first_vertex;
+            float pt = f->prev_t, span = t - pt;
             for (uint32_t k = 0; k < d->vertices; k++) {
                 if (from) {
-                    memcpy(prevpos[k], from[k].pos, sizeof prevpos[k]);
+                    for (int q = 0; q < 4; q++) prevpos[k][q] = from[k].pos[q] + (at[k].pos[q] - from[k].pos[q]) * pt;
                 } else {
                     memcpy(prevpos[k], v[k].pos, sizeof prevpos[k]);
                     if (S->color_base == top_target) {
-                        prevpos[k][0] += scene[0] * prevpos[k][3];
-                        prevpos[k][1] += scene[1] * prevpos[k][3];
+                        prevpos[k][0] += scene[0] * span * prevpos[k][3];
+                        prevpos[k][1] += scene[1] * span * prevpos[k][3];
                     }
                 }
             }
