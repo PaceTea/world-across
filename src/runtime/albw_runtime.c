@@ -34,6 +34,7 @@ static const albw_fn *module_ptrs;
 #include "albw_thread.h"
 
 #include "albw_platform.h"
+#include "albw_card.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -575,6 +576,33 @@ static void card_product(const char *card, char out[17]) {
     fclose(f);
 }
 
+// A file the game can be played from: a card image, with a card header -- and, in a build with its
+// translation in it, of the release that translation is of.
+static int card_playable(const char *path) {
+    if (!looks_like_card(path)) return 0;
+    char prod[17];
+    card_product(path, prod);
+    if (!prod[0]) return 0;
+#ifndef ALBW_GAME_MODULE
+    if (BUILD_PRODUCT[0] && strcmp(prod, BUILD_PRODUCT)) return 0;
+#endif
+    return 1;
+}
+
+// The card into the program's card folder (albw_card.h), where tidying up elsewhere cannot take it
+// away; ALBW_CARD_STAYS=1 leaves it where it is. `out` is where it is afterwards.
+static void keep_card(const char *card, char *out, size_t n, volatile float *progress) {
+    const char *stays = getenv("ALBW_CARD_STAYS");
+    if (stays && *stays && strcmp(stays, "0")) {
+        snprintf(out, n, "%s", card);
+        return;
+    }
+    char why[1400];
+    int kept = albw_card_keep(card, out, n, progress, why, sizeof why);
+    if (kept == 2) printf("[card ] moved %s into the card folder: %s\n", card, out);
+    if (why[0]) printf("[card ] %s\n", why);
+}
+
 static const char *default_code(void) {
     static char path[1100];
     struct stat st;
@@ -723,7 +751,8 @@ static void game_card_chosen(const char *card) {
 #ifdef ALBW_HAVE_WINDOW
 // The launcher's file dialog picked a card (albw_launcher_set_card_chooser): checked as one named
 // on the command line is, remembered, and given to the kernel for the game to read when it starts.
-static int choose_card(const char *path, char product[17], char *why, size_t n) {
+static int choose_card(const char *path, char product[17], char *where, size_t where_n, char *why,
+                       size_t n, volatile float *progress) {
     static char chosen[1024];
     if (!looks_like_card(path)) {
         snprintf(why, n, "A card image is a file of 16 MB and more.");
@@ -743,7 +772,8 @@ static int choose_card(const char *path, char product[17], char *why, size_t n) 
         return 0;
     }
 #endif
-    snprintf(chosen, sizeof chosen, "%s", path);
+    keep_card(path, chosen, sizeof chosen, progress);
+    snprintf(where, where_n, "%s", chosen);
     remember_card(chosen);
     albw_kernel_set_rom(chosen);
     memcpy(product, prod, 17);
@@ -778,7 +808,25 @@ int main(int argc, char **argv) {
         }
     }
     if (!path) path = default_code();
+    // The card a player names, or the one remembered, is kept in the program's card folder from
+    // then on (albw_card.h); the one in ALBW_ROM, the tools', is left where it is. With none, or
+    // the remembered one gone, the card folder's own.
+    int card_from_env = card != NULL && !card_named;
     if (!card) card = remembered_card();
+    static char card_kept[1024];
+    if (card && !card_from_env && card_playable(card)) {
+        keep_card(card, card_kept, sizeof card_kept, NULL);
+        if (strcmp(card_kept, card)) {
+            card = card_kept;
+            card_named = 1;
+        }
+    }
+    if (!card_from_env && (!card || !looks_like_card(card)) &&
+        albw_card_find(card_kept, sizeof card_kept, card_playable)) {
+        printf("[card ] %s, from the card folder\n", card_kept);
+        card = card_kept;
+        card_named = 1;
+    }
     if (card_named) remember_card(card);
     if (!card) {
         fprintf(stderr, "[init] no card image: start it once as  albw-boot /path/to/your.3ds  -- "
@@ -849,7 +897,7 @@ int main(int argc, char **argv) {
     if (card) {
         char prod[17];
         card_product(card, prod);
-        albw_launcher_set_card(prod);
+        albw_launcher_set_card(prod, card);
     }
     albw_launcher_set_card_chooser(choose_card);
 #ifdef ALBW_GAME_MODULE

@@ -50,7 +50,7 @@ static const struct { const char *code, *name; } languages[] = {
 static struct albw_settings settings = {
     .layout = ALBW_LAYOUT_STACKED, .antialias = ALBW_AA_4X, .upscale = ALBW_UPSCALE_OFF,
     .sharpness = 1,
-    .frame_rate = ALBW_RATE_CONSOLE, .frame_gen = ALBW_FRAMEGEN_OFF, .sound = 1, .gamepads = 1,
+    .frame_rate = ALBW_RATE_CONSOLE, .sound = 1, .gamepads = 1,
     .touch_controls = ALBW_TOUCH_ALL,
 };
 
@@ -60,7 +60,6 @@ static const char *const upscale_keys[ALBW_UPSCALERS] = {
     "off", "bilinear", "fsr1", "fsr3", "dlss", "software",
 };
 static const char *const rate_keys[ALBW_RATES] = { "console", "display", "uncapped" };
-static const char *const framegen_keys[ALBW_FRAMEGENS] = { "off", "fsr3", "dlss" };
 static const char *const renderer_keys[ALBW_RENDERERS] = { "gpu", "software" };
 static const char *const resolution_keys[ALBW_RESOLUTIONS] = {
     "auto", "1", "2", "3", "4", "5", "6", "7", "8",
@@ -96,12 +95,12 @@ static void settings_save(void) {
     FILE *f = fopen(path, "w");
     if (!f) return;
     fprintf(f, "fullscreen=%d\nlayout=%s\nrenderer=%s\nresolution=%s\nantialias=%s\nupscale=%s\n"
-               "sharpness=%d\nframerate=%s\nframegen=%s\ninteger=%d\nsound=%d\ngamepads=%d\n"
+               "sharpness=%d\nframerate=%s\ninteger=%d\nsound=%d\ngamepads=%d\n"
                "touch=%s\nlanguage=%s\n",
             settings.fullscreen, layout_keys[settings.layout], renderer_keys[settings.renderer],
             resolution_keys[settings.resolution], aa_keys[settings.antialias],
             upscale_keys[settings.upscale],
-            settings.sharpness, rate_keys[settings.frame_rate], framegen_keys[settings.frame_gen],
+            settings.sharpness, rate_keys[settings.frame_rate],
             settings.integer_scale, settings.sound, settings.gamepads,
             touch_keys[settings.touch_controls], languages[settings.language].code);
     fclose(f);
@@ -147,8 +146,6 @@ const struct albw_settings *albw_settings_load(void) {
         }
         else if (!strcmp(line, "framerate"))
             settings.frame_rate = key_index(rate_keys, ALBW_RATES, v, ALBW_RATE_CONSOLE);
-        else if (!strcmp(line, "framegen"))
-            settings.frame_gen = key_index(framegen_keys, ALBW_FRAMEGENS, v, ALBW_FRAMEGEN_OFF);
         else if (!strcmp(line, "integer")) settings.integer_scale = atoi(v) != 0;
         else if (!strcmp(line, "sound")) settings.sound = atoi(v) != 0;
         else if (!strcmp(line, "gamepads")) settings.gamepads = atoi(v) != 0;
@@ -179,8 +176,6 @@ const struct albw_settings *albw_settings_load(void) {
     if (aa && *aa) settings.antialias = key_index(aa_keys, ALBW_AAS, aa, settings.antialias);
     const char *rate = getenv("ALBW_FRAME_RATE");
     if (rate && *rate) settings.frame_rate = key_index(rate_keys, ALBW_RATES, rate, settings.frame_rate);
-    const char *gen = getenv("ALBW_FRAMEGEN");
-    if (gen && *gen) settings.frame_gen = key_index(framegen_keys, ALBW_FRAMEGENS, gen, settings.frame_gen);
     env_flag("ALBW_INTEGER_SCALE", &settings.integer_scale);
     int mute;
     if (env_flag("ALBW_MUTE", &mute)) settings.sound = !mute;
@@ -215,6 +210,15 @@ static SDL_Renderer *renderer;
 static unsigned char *serif_data, *sans_data, *small_data;
 static SDL_Texture *wallpaper;
 static int wallpaper_is_scene;                           // the kept backdrop, not the player's picture
+static int wallpaper_is_art;                             // the launcher's own picture, credited below
+
+// The launcher's picture, made for World Across by teethegrinder (third_party/art). Shown with a
+// button in the corner that names the artist, and a second press opens the artist's page.
+#define ARTIST_NAME "teethegrinder"
+#define ARTIST_URL "https://www.instagram.com/teethegrinder"
+static int artist_focus, artist_open;                   // selected (keys, pad, mouse); name shown
+static float artist_glow, artist_w;
+static SDL_FRect artist_hit;
 static struct font f_title, f_kicker, f_item, f_small;
 static int baked_for_h;
 
@@ -280,19 +284,28 @@ static unsigned char *find_font(const char *pattern, const char *const *fallback
     return find_font_of(pattern, NULL, fallbacks);
 }
 
-// The menu's own type, Fira Sans Condensed (SIL Open Font License), which the packages bring: beside
-// the program (fonts/), where an AppImage keeps it, or in the checkout it was built in.
-static unsigned char *bundled_font(const char *file) {
-    char exe[600], path[800];
+// A file the packages bring for the menu, in `dir` (fonts/, art/): beside the program, where an
+// AppImage keeps it, or in the checkout it was built in. 1 and its path if it is there.
+static int bundled_path(const char *dir, const char *file, char *out, size_t n) {
+    char exe[600];
     albw_exe_dir(exe, sizeof exe);
-    const char *const layouts[] = { "%s/fonts/%s", "%s/../share/world-across/fonts/%s",
-                                    "%s/../third_party/fonts/%s" };
+    const char *const layouts[] = { "%s/%s/%s", "%s/../share/world-across/%s/%s",
+                                    "%s/../third_party/%s/%s" };
     for (size_t i = 0; i < sizeof layouts / sizeof layouts[0]; i++) {
-        snprintf(path, sizeof path, layouts[i], exe, file);
-        unsigned char *d = read_file(path);
-        if (d) return d;
+        snprintf(out, n, layouts[i], exe, dir, file);
+        FILE *f = fopen(out, "rb");
+        if (f) {
+            fclose(f);
+            return 1;
+        }
     }
-    return NULL;
+    return 0;
+}
+
+// The menu's own type, Fira Sans Condensed (SIL Open Font License).
+static unsigned char *bundled_font(const char *file) {
+    char path[800];
+    return bundled_path("fonts", file, path, sizeof path) ? read_file(path) : NULL;
 }
 
 static void bake(struct font *f, const unsigned char *data, float size) {
@@ -383,7 +396,7 @@ static float text(const struct font *f, float x, float y, const char *s, SDL_Col
 enum { PAGE_MAIN, PAGE_SETTINGS };
 enum { ITEM_PLAY, ITEM_SETTINGS, ITEM_MODS, ITEM_QUIT, MAIN_ITEMS };
 enum { ROW_FULLSCREEN, ROW_LAYOUT, ROW_RENDERER, ROW_RESOLUTION, ROW_AA, ROW_UPSCALE,
-       ROW_SHARPNESS, ROW_FRAME_RATE, ROW_FRAME_GEN, ROW_INTEGER, ROW_SOUND, ROW_GAMEPADS,
+       ROW_SHARPNESS, ROW_FRAME_RATE, ROW_INTEGER, ROW_SOUND, ROW_GAMEPADS,
        ROW_TOUCH, ROW_LANGUAGE, ROW_BACK, SETTINGS_ROWS };
 
 // The settings page, row by row. A row with few choices shows them all side by side, the chosen
@@ -398,7 +411,6 @@ static const char *const sharp_names[ALBW_FSR_SHARPNESS_LEVELS] = {
     "Strongest", "Strong", "Medium", "Light", "Lightest",
 };
 static const char *const rate_names[ALBW_RATES] = { "60 (console)", "Display", "Uncapped" };
-static const char *const framegen_names[ALBW_FRAMEGENS] = { "Off", "FSR 3", "DLSS" };
 static const char *const renderer_names[ALBW_RENDERERS] = { "GPU", "Software" };
 static const char *const aa_names[ALBW_AAS] = { "Off", "2x MSAA", "4x MSAA", "8x MSAA" };
 static const char *const touch_names[ALBW_TOUCHES] = { "Mouse", "Touchpad", "Gyro", "Stick", "All" };
@@ -424,7 +436,6 @@ static const struct row_def {
     [ROW_UPSCALE] = { "Upscaling", upscale_names, ALBW_UPSCALERS, 1, ALBW_SET_UPSCALE },
     [ROW_SHARPNESS] = { "Sharpening", sharp_names, ALBW_FSR_SHARPNESS_LEVELS, 0, -1 },
     [ROW_FRAME_RATE] = { "Frame rate", rate_names, ALBW_RATES, 1, ALBW_SET_FRAME_RATE },
-    [ROW_FRAME_GEN] = { "Frame generation", framegen_names, ALBW_FRAMEGENS, 1, ALBW_SET_FRAME_GEN },
     [ROW_INTEGER] = { "Whole-pixel scaling", on_off, 2, 1, -1 },
     [ROW_SOUND] = { "Sound", on_off, 2, 1, -1 },
     [ROW_GAMEPADS] = { "Gamepads", on_off, 2, 1, -1 },
@@ -443,7 +454,6 @@ static int *row_value(int row) {
         case ROW_UPSCALE: return &settings.upscale;
         case ROW_SHARPNESS: return &settings.sharpness;
         case ROW_FRAME_RATE: return &settings.frame_rate;
-        case ROW_FRAME_GEN: return &settings.frame_gen;
         case ROW_INTEGER: return &settings.integer_scale;
         case ROW_SOUND: return &settings.sound;
         case ROW_GAMEPADS: return &settings.gamepads;
@@ -492,14 +502,6 @@ static const char *describe(int row, int choice) {
             };
             return text[choice];
         }
-        case ROW_FRAME_GEN: {
-            static const char *const text[ALBW_FRAMEGENS] = {
-                "Every frame shown is one the renderer drew.",
-                "AMD FSR 3 frame generation: frames made from the ones around them, on the GPU.",
-                "NVIDIA DLSS frame generation.",
-            };
-            return text[choice];
-        }
         case ROW_RENDERER: {
             static const char *const text[ALBW_RENDERERS] = {
                 "The graphics card draws the game, at the resolution below. Smooth and sharp.",
@@ -543,7 +545,7 @@ static const char *describe(int row, int choice) {
 static int want_visible = 1, page = PAGE_MAIN, sel_main, sel_settings, started;
 static float fade = 0.0f, glow[SETTINGS_ROWS + MAIN_ITEMS], title_at = -1.0f, dim_at;
 static uint64_t last_ns;
-static char card_product[17];
+static char card_product[17], card_path[1024];
 static SDL_FRect hit[SETTINGS_ROWS];                    // where each row was drawn, for the mouse
 static int hits;
 // Where each choice of a side-by-side row was drawn, to be clicked.
@@ -551,21 +553,31 @@ static struct { SDL_FRect r; int row, choice; } segs[64];
 static int seg_count, hover_row = -1, hover_choice = -1;
 static int stick_dir;
 
-void albw_launcher_set_card(const char *product) {
+void albw_launcher_set_card(const char *product, const char *path) {
     snprintf(card_product, sizeof card_product, "%s", product ? product : "");
+    snprintf(card_path, sizeof card_path, "%s", product && product[0] && path ? path : "");
 }
 
 // The card, when none is known yet -- started from a desktop's menu, the first time: Play opens
 // SDL's file dialog (which goes through the desktop's own), and what is picked is checked and
 // remembered by the chooser main() hands over. The dialog answers on a thread of its own, so its
-// answer waits here until the next frame takes it.
-static int (*card_chooser)(const char *path, char product[17], char *why, size_t n);
+// answer waits here until the next frame takes it. The chooser moves the card into the program's
+// card folder (albw_card.h), which across file systems is a copy of a gigabyte, so it runs on a
+// thread too, and the launcher shows how far it is.
+static int (*card_chooser)(const char *path, char product[17], char *where, size_t where_n,
+                           char *why, size_t n, volatile float *progress);
 static SDL_Mutex *card_mutex;
 static char card_picked_path[1024], card_why[240];
-static int card_dialog;                                  // 0 closed, 1 open, 2 a path waiting
+// 0 closed, 1 open, 2 a path waiting, 3 the chooser at it, 4 its answer waiting.
+static int card_dialog;
+static SDL_Thread *card_thread;
+static volatile float card_progress = -1.0f;            // the move's, while it copies
+static int card_taken, card_busy;
+static char card_taken_product[17], card_taken_path[1024], card_taken_why[240];
 
-void albw_launcher_set_card_chooser(int (*chooser)(const char *path, char product[17], char *why,
-                                                   size_t n)) {
+void albw_launcher_set_card_chooser(int (*chooser)(const char *path, char product[17], char *where,
+                                                   size_t where_n, char *why, size_t n,
+                                                   volatile float *progress)) {
     card_chooser = chooser;
 }
 
@@ -635,26 +647,50 @@ enum albw_launcher_action albw_launcher_poll(void) {
     return ALBW_LAUNCHER_NONE;
 }
 
-// A path the dialog picked, checked; called each frame the launcher is drawn.
+// The chooser, on its thread: the dialog cannot open again meanwhile, so the path stays as it is.
+static int SDLCALL card_take_thread(void *unused) {
+    (void)unused;
+    char product[17] = "", where[1024] = "", why[240] = "";
+    int ok = card_chooser(card_picked_path, product, where, sizeof where, why, sizeof why,
+                          &card_progress);
+    SDL_LockMutex(card_mutex);
+    card_taken = ok;
+    memcpy(card_taken_product, product, sizeof product);
+    snprintf(card_taken_path, sizeof card_taken_path, "%s", where);
+    snprintf(card_taken_why, sizeof card_taken_why, "%s", why);
+    card_dialog = 4;
+    SDL_UnlockMutex(card_mutex);
+    return 0;
+}
+
+// A path the dialog picked: checked and moved on a thread, and taken when that is done. Called each
+// frame the launcher is drawn.
 static void card_take(void) {
     if (!card_mutex) return;
-    char path[1024];
     SDL_LockMutex(card_mutex);
-    int waiting = card_dialog == 2;
-    if (waiting) {
-        snprintf(path, sizeof path, "%s", card_picked_path);
-        card_dialog = 0;
-    }
+    int state = card_dialog;
+    if (state == 2) card_dialog = card_chooser ? 3 : 0;
+    if (state == 4) card_dialog = 0;
     SDL_UnlockMutex(card_mutex);
-    if (!waiting || !card_chooser) return;
-    char product[17], why[240];
-    if (card_chooser(path, product, why, sizeof why)) {
-        snprintf(card_product, sizeof card_product, "%s", product);
+    card_busy = state == 2 || state == 3;
+    if (state == 2 && card_chooser) {
+        card_progress = -1.0f;
+        card_thread = SDL_CreateThread(card_take_thread, "card", NULL);
+        if (!card_thread) card_take_thread(NULL);
+        return;
+    }
+    if (state != 4) return;
+    card_busy = 0;
+    if (card_thread) SDL_WaitThread(card_thread, NULL);
+    card_thread = NULL;
+    if (card_taken) {
+        snprintf(card_product, sizeof card_product, "%s", card_taken_product);
+        snprintf(card_path, sizeof card_path, "%s", card_taken_path);
         card_why[0] = '\0';
         // The launcher's build: a card chosen is a game to make, and then to play.
         if (game_ready && !game_ready()) game_start_build();
     } else {
-        snprintf(card_why, sizeof card_why, "%s", why);
+        snprintf(card_why, sizeof card_why, "%s", card_taken_why);
     }
 }
 
@@ -705,15 +741,17 @@ int albw_launcher_init(SDL_Window *w, SDL_Renderer *r) {
     if (!small_data) small_data = sans_data;
 
     // A picture of the player's own for behind the menu: background.png or .jpg beside the
-    // settings. Nothing of the kind comes with the port; without one, the scene the game was left
-    // in last time (albw_launcher_keep_backdrop), from the player's own card.
+    // settings. Without one, the launcher's own (art/, which the packages bring); without that, the
+    // scene the game was left in last time (albw_launcher_keep_backdrop), from the player's card.
 #if HAVE_STB_IMAGE
     static const char *const names[] = { "background.png", "background.jpg", "background.jpeg",
-                                         "backdrop.jpg" };
+                                         "launcher-background.jpg", "backdrop.jpg" };
     for (size_t i = 0; i < sizeof names / sizeof names[0] && !wallpaper; i++) {
-        char path[600];
+        char path[800];
         if (i < 3) {
             albw_config_path(path, sizeof path, names[i]);
+        } else if (i == 3) {
+            if (!bundled_path("art", names[i], path, sizeof path)) continue;
         } else {
             char root[500];
             albw_cache_root(root, sizeof root);
@@ -727,7 +765,8 @@ int albw_launcher_init(SDL_Window *w, SDL_Renderer *r) {
             SDL_UpdateTexture(wallpaper, NULL, px, iw * 4);
             SDL_SetTextureScaleMode(wallpaper, SDL_SCALEMODE_LINEAR);
             SDL_SetTextureBlendMode(wallpaper, SDL_BLENDMODE_BLEND);
-            wallpaper_is_scene = i == 3;
+            wallpaper_is_art = i == 3;
+            wallpaper_is_scene = i == 4;
             printf("[launch] background %s, %dx%d\n", path, iw, ih);
         }
         stbi_image_free(px);
@@ -736,6 +775,7 @@ int albw_launcher_init(SDL_Window *w, SDL_Renderer *r) {
     const char *e = getenv("ALBW_LAUNCHER");
     if (e && !strcmp(e, "0")) want_visible = 0;
     if (e && !strcmp(e, "settings")) page = PAGE_SETTINGS;   // for screenshots of that page
+    if (e && !strcmp(e, "artist")) artist_focus = artist_open = 1;
     last_ns = SDL_GetTicksNS();
     return 1;
 }
@@ -772,7 +812,20 @@ static enum albw_launcher_action pick(int row, int choice) {
     return ALBW_LAUNCHER_APPLY;
 }
 
+// The artist's button: the first press shows the name, the next opens the artist's page.
+static void artist_press(void) {
+    if (!artist_open) {
+        artist_open = 1;
+        return;
+    }
+    if (!SDL_OpenURL(ARTIST_URL)) printf("[launch] %s does not open: %s\n", ARTIST_URL, SDL_GetError());
+}
+
 static enum albw_launcher_action confirm(void) {
+    if (page == PAGE_MAIN && artist_focus) {
+        artist_press();
+        return ALBW_LAUNCHER_NONE;
+    }
     if (page == PAGE_SETTINGS) {
         if (sel_settings == ROW_BACK) {
             page = PAGE_MAIN;
@@ -783,6 +836,7 @@ static enum albw_launcher_action confirm(void) {
     }
     switch (sel_main) {
         case ITEM_PLAY:
+            if (card_busy) return ALBW_LAUNCHER_NONE;     // the card picked is being moved
             // With no card yet, Play asks for one first.
             if (!card_product[0] && card_chooser && !started) {
                 card_ask();
@@ -808,6 +862,10 @@ static enum albw_launcher_action confirm(void) {
 }
 
 static enum albw_launcher_action back(void) {
+    if (page == PAGE_MAIN && (artist_focus || artist_open)) {
+        artist_focus = artist_open = 0;
+        return ALBW_LAUNCHER_NONE;
+    }
     if (page == PAGE_SETTINGS) {
         page = PAGE_MAIN;
         return ALBW_LAUNCHER_NONE;
@@ -821,11 +879,17 @@ static enum albw_launcher_action back(void) {
 
 static void move(int dir) {
     if (page == PAGE_SETTINGS) sel_settings = (sel_settings + SETTINGS_ROWS + dir) % SETTINGS_ROWS;
+    else if (artist_focus) artist_focus = 0;            // up or down: back to the menu
     else sel_main = (sel_main + MAIN_ITEMS + dir) % MAIN_ITEMS;
     hover_row = hover_choice = -1;
 }
 
 static enum albw_launcher_action sideways(int dir) {
+    if (page == PAGE_MAIN && wallpaper_is_art) {        // right to the artist's button, left back
+        artist_focus = dir > 0;
+        if (!artist_focus) artist_open = 0;
+        return ALBW_LAUNCHER_NONE;
+    }
     if (page != PAGE_SETTINGS || sel_settings == ROW_BACK) return ALBW_LAUNCHER_NONE;
     step(sel_settings, dir);
     hover_row = hover_choice = -1;
@@ -879,6 +943,15 @@ enum albw_launcher_action albw_launcher_event(const SDL_Event *e) {
             x *= scale;
             y *= scale;
             int click = e->type == SDL_EVENT_MOUSE_BUTTON_DOWN && e->button.button == SDL_BUTTON_LEFT;
+            if (page == PAGE_MAIN && wallpaper_is_art) {
+                const SDL_FRect *r = &artist_hit;
+                if (x >= r->x && x <= r->x + r->w && y >= r->y && y <= r->y + r->h) {
+                    artist_focus = 1;
+                    if (click) artist_press();
+                    return ALBW_LAUNCHER_NONE;
+                }
+                if (click) artist_open = 0;              // a click anywhere else folds it away
+            }
             if (page == PAGE_SETTINGS) {
                 hover_row = hover_choice = -1;
                 for (int i = 0; i < seg_count; i++) {
@@ -894,7 +967,10 @@ enum albw_launcher_action albw_launcher_event(const SDL_Event *e) {
                 if (x < hit[i].x || x > hit[i].x + hit[i].w || y < hit[i].y || y > hit[i].y + hit[i].h)
                     continue;
                 if (page == PAGE_SETTINGS) sel_settings = i;
-                else sel_main = i;
+                else {
+                    sel_main = i;
+                    artist_focus = 0;
+                }
                 if (click) return confirm();
                 break;
             }
@@ -1008,10 +1084,10 @@ void albw_launcher_draw(SDL_Texture *top) {
         static const char *labels[MAIN_ITEMS] = { "PLAY", "SETTINGS", "MODS", "QUIT" };
         for (int i = 0; i < MAIN_ITEMS; i++) {
             float *g = &glow[i];
-            *g = approach(*g, i == sel_main ? 1.0f : 0.0f, 14.0f, dt);
+            *g = approach(*g, i == sel_main && !artist_focus ? 1.0f : 0.0f, 14.0f, dt);
             const char *label = (i == ITEM_PLAY && started) ? "RESUME"
+                              : (i == ITEM_PLAY && (building || card_busy)) ? "PREPARING..."
                               : (i == ITEM_PLAY && !card_product[0] && card_chooser) ? "CHOOSE CARD"
-                              : (i == ITEM_PLAY && building) ? "PREPARING..."
                               : labels[i];
             int dim = i == ITEM_MODS;
             float x = x0 + *g * W * 0.012f;
@@ -1152,13 +1228,29 @@ void albw_launcher_draw(SDL_Texture *top) {
                  grey, 0.6f * fade);
         }
     }
-    if (!card_product[0] && card_chooser && page == PAGE_MAIN && !build_shown) {
+    if (card_busy && page == PAGE_MAIN && !build_shown) {
+        // The card picked, on its way into the card folder: a rename, or a copy that says how far.
+        text(&f_small, x0, yb - H * 0.032f, "Moving the card into the card folder...", white, 0.9f * fade);
+        float p = card_progress;
+        if (p >= 0.0f) {
+            float bar_y = yb - H * 0.004f, bar_w = W * 0.42f, bar_h = H * 0.007f;
+            SDL_SetRenderDrawColorFloat(renderer, 1.0f, 1.0f, 1.0f, 0.12f * fade);
+            SDL_FRect track = { x0, bar_y, bar_w, bar_h };
+            SDL_RenderFillRect(renderer, &track);
+            SDL_SetRenderDrawColorFloat(renderer, 0.96f, 0.77f, 0.36f, 0.9f * fade);
+            SDL_FRect fill = { x0, bar_y, bar_w * (p > 1.0f ? 1.0f : p), bar_h };
+            SDL_RenderFillRect(renderer, &fill);
+        }
+        text(&f_small, x0, yb + H * 0.032f, "It stays there, beside the program, and is played from there.",
+             grey, 0.6f * fade);
+    }
+    if (!card_product[0] && card_chooser && page == PAGE_MAIN && !build_shown && !card_busy) {
         // No card yet: what Play will do, or why the last one picked was not taken.
         text(&f_small, x0, yb - H * 0.032f, card_why[0] ? "That file is not a card this build plays."
                                                           : "No card image yet.",
              card_why[0] ? gold : grey, 0.9f * fade);
         text(&f_small, x0, yb, card_why[0] ? card_why
-                                           : "Choose a decrypted dump of your own cartridge; it is remembered.",
+                                           : "Choose a decrypted dump of your own cartridge; it moves into the card folder.",
              grey, 0.7f * fade);
     }
     if (card_product[0] && page == PAGE_MAIN && !build_shown) {
@@ -1169,13 +1261,53 @@ void albw_launcher_draw(SDL_Texture *top) {
         snprintf(line, sizeof line, "3DS \xc2\xb7 %s \xc2\xb7 %s", where, card_product);
         text(&f_small, x0, yb - H * 0.032f, "Card ready.", green, 0.9f * fade);
         text(&f_small, x0, yb, line, grey, 0.7f * fade);
+        // Where it is: the card folder, normally, under the home directory as ~.
+        if (card_path[0]) {
+            char dir[1024], place[1100];
+            snprintf(dir, sizeof dir, "%s", card_path);
+            char *a = strrchr(dir, '/'), *b = strrchr(dir, '\\');
+            if (a > b ? a : b) *(a > b ? a : b) = '\0';
+            const char *home = getenv("HOME");
+            size_t hn = home ? strlen(home) : 0;
+            if (hn > 1 && !strncmp(dir, home, hn) && (dir[hn] == '/' || !dir[hn]))
+                snprintf(place, sizeof place, "In ~%s", dir + hn);
+            else
+                snprintf(place, sizeof place, "In %s", dir);
+            text(&f_small, x0, yb + H * 0.032f, place, grey, 0.5f * fade);
+        }
     }
+    // The hint above the corner, higher where the artist's button sits in it; the button's own
+    // hint, once the name is shown, in its place.
+    int artist_shown = page == PAGE_MAIN && wallpaper_is_art;
     const char *hint = page == PAGE_SETTINGS ? "Arrows change \xc2\xb7 Esc back"
-                                             : (started ? "Esc resumes \xc2\xb7 F1 settings" : "");
-    if (*hint) text(&f_small, W - x0 - text_width(&f_small, hint), yb - H * 0.032f, hint, grey,
-                    0.6f * fade);
+                     : artist_shown && artist_open && artist_focus ? "Opens the artist's Instagram"
+                     : (started ? "Esc resumes \xc2\xb7 F1 settings" : "");
+    float hint_y = yb - H * (artist_shown ? 0.062f : 0.032f);
+    if (*hint) text(&f_small, W - x0 - text_width(&f_small, hint), hint_y, hint, grey, 0.6f * fade);
     const char *version = "World Across 0.1";
-    text(&f_small, W - x0 - text_width(&f_small, version), yb, version, grey, 0.6f * fade);
+    float version_right = W - x0;
+    if (artist_shown) {
+        // The artist's button, in the corner: ARTIST, then the name, which opens the artist's page.
+        // It widens to the name smoothly; the version line keeps to its left.
+        const char *label = artist_open ? ARTIST_NAME : "ARTIST";
+        float pad = H * 0.018f, bh = H * 0.042f;
+        float want = text_width(&f_small, label) + 2.0f * pad;
+        artist_w = artist_w <= 0.0f ? want : approach(artist_w, want, 16.0f, dt);
+        artist_glow = approach(artist_glow, artist_focus ? 1.0f : 0.0f, 14.0f, dt);
+        SDL_FRect box = { W - x0 - artist_w, yb - bh * 0.72f, artist_w, bh };
+        artist_hit = box;
+        SDL_SetRenderDrawColorFloat(renderer, 0.0f, 0.0f, 0.0f, (0.35f + 0.2f * artist_glow) * fade);
+        SDL_RenderFillRect(renderer, &box);
+        SDL_SetRenderDrawColorFloat(renderer, 1.0f + (0.96f - 1.0f) * artist_glow,
+                                    1.0f + (0.77f - 1.0f) * artist_glow,
+                                    1.0f + (0.36f - 1.0f) * artist_glow, (0.3f + 0.6f * artist_glow) * fade);
+        SDL_RenderRect(renderer, &box);
+        float tw = text_width(&f_small, label);
+        text(&f_small, box.x + (box.w - tw) * 0.5f, yb, label, artist_glow > 0.5f ? gold : white,
+             (0.75f + 0.25f * artist_glow) * fade);
+        version_right = box.x - W * 0.012f;
+    }
+    text(&f_small, version_right - text_width(&f_small, version), yb, version, grey, 0.6f * fade);
 #ifdef ALBW_HAVE_DLSS
     // NVIDIA's licence for the DLSS SDK (section 7.1 b of its RTX supplement) asks a program that
     // includes it to name the SDK on its splash screen, about box and credits; the launcher's

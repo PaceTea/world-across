@@ -33,6 +33,7 @@ set(ALBW_RUNTIME_SOURCES
     src/runtime/albw_shader.c
     src/runtime/albw_thread.c
     src/runtime/albw_platform.c
+    src/runtime/albw_card.c
 )
 
 # Two programs play the game. albw-boot has the translation linked in: it is what the tools and the
@@ -307,6 +308,7 @@ add_executable(albw-boot-trace
     src/runtime/albw_shader.c
     src/runtime/albw_thread.c
     src/runtime/albw_platform.c
+    src/runtime/albw_card.c
     ${ALBW_GENERATED}
 )
 target_include_directories(albw-boot-trace PRIVATE src/runtime src/generated)
@@ -331,6 +333,7 @@ add_executable(albw-boot-writes
     src/runtime/albw_shader.c
     src/runtime/albw_thread.c
     src/runtime/albw_platform.c
+    src/runtime/albw_card.c
     ${ALBW_GENERATED}
 )
 target_include_directories(albw-boot-writes PRIVATE src/runtime src/generated)
@@ -355,6 +358,7 @@ add_executable(albw-boot-nan
     src/runtime/albw_shader.c
     src/runtime/albw_thread.c
     src/runtime/albw_platform.c
+    src/runtime/albw_card.c
     ${ALBW_GENERATED}
 )
 target_include_directories(albw-boot-nan PRIVATE src/runtime src/generated)
@@ -380,6 +384,7 @@ add_library(albw-kernel SHARED
     src/runtime/albw_shader.c
     src/runtime/albw_thread.c
     src/runtime/albw_platform.c
+    src/runtime/albw_card.c
     src/runtime/albw_kernel_shim.c
 )
 target_include_directories(albw-kernel PRIVATE src/runtime)

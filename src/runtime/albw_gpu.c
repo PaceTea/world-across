@@ -481,6 +481,14 @@ static struct texentry *texture_get(const struct albw_gpu_texture *t, struct tex
         e->used = frames_drawn;
         return e;
     }
+    // Bytes the game has loaded over since it drew with them -- it goes on to the next frame while
+    // the frames between are drawn from this one, and walking out of a place loads the next one's
+    // textures where these were: the roof and the weather vane once came out of the new bytes for a
+    // frame. What was uploaded before stays, then.
+    if (e && t->sample && albw_texture_sample(t->base, span) != t->sample) {
+        e->used = frames_drawn;
+        return e;
+    }
     uint64_t h = hash_bytes(albw_mem + t->base, span);
     if (e && e->hash == h) {
         e->checked = e->used = frames_drawn;

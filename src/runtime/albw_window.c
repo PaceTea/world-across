@@ -105,12 +105,6 @@ int albw_window_offers(int setting, int choice, const char **why) {
             if (!gpu_ok || albw_settings()->renderer != ALBW_RENDERER_GPU)
                 reason = "Applies to the GPU renderer; the processor draws at the console's own.";
             break;
-        case ALBW_SET_FRAME_GEN:
-            if (choice == ALBW_FRAMEGEN_FSR3)
-                reason = "Coming: FSR 3's frame interpolation, on the same device as its upscaling.";
-            if (choice == ALBW_FRAMEGEN_DLSS)
-                reason = "Coming: needs an RTX 40 or newer, and the camera's matrices worked out first.";
-            break;
         default:
             break;
     }

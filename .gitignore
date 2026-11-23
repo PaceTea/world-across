@@ -31,3 +31,6 @@ __pycache__/
 
 # SDKs downloaded for building, never committed (the DLSS one is under NVIDIA's licence)
 external/
+
+# The card folder a build in the tree keeps the player's card in (src/runtime/albw_card.h).
+/card/

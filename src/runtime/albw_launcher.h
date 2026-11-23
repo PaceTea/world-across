@@ -25,9 +25,6 @@ enum { ALBW_UPSCALE_OFF, ALBW_UPSCALE_BILINEAR, ALBW_UPSCALE_FSR1, ALBW_UPSCALE_
 // beyond needs frames in between.
 enum { ALBW_RATE_CONSOLE, ALBW_RATE_DISPLAY, ALBW_RATE_UNCAPPED, ALBW_RATES };
 
-// Frames made from the frames around them, by AMD's or NVIDIA's frame generation.
-enum { ALBW_FRAMEGEN_OFF, ALBW_FRAMEGEN_FSR3, ALBW_FRAMEGEN_DLSS, ALBW_FRAMEGENS };
-
 // Who draws the picture: the graphics card, from the frames the game records, at a multiple of the
 // console's resolution -- or the processor, at the console's own, which is what the game's frames
 // are checked against.
@@ -51,7 +48,7 @@ static const float albw_fsr_stops[ALBW_FSR_SHARPNESS_LEVELS] = { 0.0f, 0.2f, 0.5
 
 // What this build, on this machine, can do: 1 if `choice` of `setting` is available; else 0, and
 // `why` (if not NULL) says what it would take. The launcher offers only what is available.
-enum { ALBW_SET_UPSCALE, ALBW_SET_FRAME_RATE, ALBW_SET_FRAME_GEN, ALBW_SET_RENDERER,
+enum { ALBW_SET_UPSCALE, ALBW_SET_FRAME_RATE, ALBW_SET_RENDERER,
        ALBW_SET_RESOLUTION, ALBW_SET_AA };
 int albw_window_offers(int setting, int choice, const char **why);
 
@@ -64,7 +61,6 @@ struct albw_settings {
     int upscale;              // ALBW_UPSCALE_*
     int sharpness;            // an index into albw_fsr_stops: 0 strongest
     int frame_rate;           // ALBW_RATE_*
-    int frame_gen;            // ALBW_FRAMEGEN_*
     int integer_scale;
     int sound;
     int gamepads;
@@ -81,8 +77,9 @@ const struct albw_settings *albw_settings(void);
 // the game then starts without the launcher.
 int albw_launcher_init(SDL_Window *window, SDL_Renderer *renderer);
 
-// The card the game is running from, for the line that says it is ready: its product code.
-void albw_launcher_set_card(const char *product);
+// The card the game is running from, for the line that says it is ready: its product code, and
+// where it is.
+void albw_launcher_set_card(const char *product, const char *path);
 
 // The launcher's build (world-across): `ready` says whether the game is there to play, `build`
 // starts making it from the card, `progress` says how that goes. With them set, Play makes the game
@@ -92,10 +89,13 @@ void albw_launcher_set_builder(int (*ready)(void), int (*build)(void),
                                void (*progress)(struct albw_build_progress *out));
 
 // With no card known, Play asks for one in a file dialog and hands the path to `chooser`, which
-// checks it, remembers it and gives the game its RomFS: it returns 1 and the product code, or 0
-// and why not. Set by main() before the window opens.
-void albw_launcher_set_card_chooser(int (*chooser)(const char *path, char product[17], char *why,
-                                                   size_t n));
+// checks it, moves it into the card folder (albw_card.h), remembers it and gives the game its
+// RomFS: it returns 1, the product code and where the card is now (`where`), or 0 and why not.
+// It runs on a thread of its own, and sets *progress from 0 to 1 while a move copies. Set by main()
+// before the window opens.
+void albw_launcher_set_card_chooser(int (*chooser)(const char *path, char product[17], char *where,
+                                                   size_t where_n, char *why, size_t n,
+                                                   volatile float *progress));
 
 enum albw_launcher_action {
     ALBW_LAUNCHER_NONE,       // nothing for the window to do

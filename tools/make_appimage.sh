@@ -224,6 +224,9 @@ cp "$root/third_party/fsr1/license.txt" "$doc/licences/FSR1-LICENSE.txt"
 mkdir -p "$appdir/usr/share/world-across/fonts"
 cp "$root"/third_party/fonts/*.ttf "$appdir/usr/share/world-across/fonts/"
 cp "$root/third_party/fonts/OFL.txt" "$doc/licences/FiraSans-OFL.txt"
+# The launcher's picture, by teethegrinder, beside the fonts.
+mkdir -p "$appdir/usr/share/world-across/art"
+cp "$root/third_party/art/launcher-background.jpg" "$appdir/usr/share/world-across/art/"
 ffx_licence="$root/external/fidelityfx-sdk-v1.1.4/sdk/LICENSE.txt"
 if grep -q 'FidelityFX SDK found' "$work/launcher-configure.log"; then
     cp "$ffx_licence" "$doc/licences/FidelityFX-SDK-LICENSE.txt"
@@ -241,6 +244,10 @@ SDL 3.4.20 (built into world-across) -- zlib licence, SDL3-LICENSE.txt
 Fira Sans Condensed 4.301 (usr/share/world-across/fonts) -- SIL Open Font License 1.1,
 FiraSans-OFL.txt
     https://github.com/bBoxType/FiraSans
+
+The launcher's picture (usr/share/world-across/art/launcher-background.jpg) -- by teethegrinder,
+made for World Across on commission; not under the MIT licence of the code
+    https://www.instagram.com/teethegrinder
 
 AMD FidelityFX Super Resolution 1 and the FidelityFX SDK 1.1.4 (FSR 3), built into world-across --
 MIT, FSR1-LICENSE.txt and FidelityFX-SDK-LICENSE.txt

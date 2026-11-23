@@ -608,6 +608,7 @@ struct tex_state {
     uint32_t base, width, height, format, wrap_s, wrap_t;
     rgba32 border;
     texel_reader read;                                   // for the format
+    uint64_t sample;                                     // its bytes when recorded (albw_texture_sample)
     uint32_t row_bytes;                                  // one row of 8x8 tiles, for 8 bits and up
 };
 
@@ -1368,6 +1369,35 @@ static void lerp_vertex(const struct vertex *a, const struct vertex *b, float t,
     const float *fa = (const float *)a, *fb = (const float *)b;
     float *fo = (float *)out;
     for (size_t i = 0; i < sizeof *out / sizeof(float); i++) fo[i] = fa[i] + (fb[i] - fa[i]) * t;
+}
+
+// A draw's vertices `t` of the way from where one frame has them to where the next does, for a
+// frame in between. Texture coordinates that jump are not slid across what lies between them: the
+// grass and flowers sway by stepping, every ten frames or so, to the next picture of a sheet a
+// quarter of the texture along, and halfway there showed the edges of two pictures -- blades
+// bent wrong, flowers as triangles. A unit whose coordinates move by more than TC_JUMP anywhere in
+// the draw takes the nearer frame's; what scrolls smoothly still slides.
+#define TC_JUMP 0.05f
+static void lerp_draw(const struct vertex *a, const struct vertex *b, uint32_t n, float t,
+                      struct vertex *out) {
+    int jumps[3] = { 0, 0, 0 };
+    for (uint32_t k = 0; k < n; k++) {
+        for (int u = 0; u < 3; u++) {
+            if (fabsf(a[k].tc[u][0] - b[k].tc[u][0]) > TC_JUMP
+                    || fabsf(a[k].tc[u][1] - b[k].tc[u][1]) > TC_JUMP) {
+                jumps[u] = 1;
+            }
+        }
+    }
+    const struct vertex *near = t < 0.5f ? a : b;
+    for (uint32_t k = 0; k < n; k++) {
+        lerp_vertex(&a[k], &b[k], t, &out[k]);
+        for (int u = 0; u < 3; u++) {
+            if (!jumps[u]) continue;
+            memcpy(out[k].tc[u], near[k].tc[u], sizeof out[k].tc[u]);
+            if (u == 0) out[k].tc0_w = near[k].tc0_w;
+        }
+    }
 }
 
 struct prepared;
@@ -2406,8 +2436,27 @@ static void rec_draw(const struct vertex *shaded, uint32_t distinct, const uint3
     for (int t = 0; t < REC_LUTS; t++) {
         S->light.lut[t] = S->lighting ? rec_lut(r, t, ds.light.lut[t]) : NULL;
     }
+    // What its textures held as the game drew it: the frames drawn from the record come later,
+    // while the game has gone on, and may have loaded others over them by then.
+    for (int u = 0; u < 3; u++) {
+        struct tex_state *t = &S->tex[u];
+        t->sample = 0;
+        if (!t->enabled || !t->usable) continue;
+        uint32_t span = 0;
+        for (int k = 0; k <= t->max_level; k++) {
+            span += albw_raster_texture_bytes(t->width >> k, t->height >> k, t->format);
+        }
+        t->sample = albw_texture_sample(t->base, span);
+    }
 
+    // Which screen's pass it is in: the game draws the top screen and then the bottom one into the
+    // same target, a display transfer after each, so the target alone does not tell them apart --
+    // and the text typed into the top screen's box, four letters long, was taken for the bottom
+    // screen's "Gear" of four.
+    uint32_t pass = 0;
+    for (uint32_t i = 0; i < r->ev_count; i++) pass += r->ev[i].kind == EV_TRANSFER;
     uint64_t loose = 0xCBF29CE484222325ull;
+    loose = fnv64(loose, pass);
     loose = fnv64(loose, entry);
     loose = fnv64(loose, count);
     loose = fnv64(loose, topology);
@@ -2479,9 +2528,11 @@ static uint64_t mix64(uint64_t x) {
 
 // Which draw of the record before each draw is. Draws with the same key are the same mesh drawn
 // with the same textures into the same target -- often many of them, a bush or a fence post again
-// and again -- and which of those is which goes by where they are: each takes the nearest of the
-// earlier ones not yet taken, within a third of the view. Going by their order instead went wrong
-// as soon as one came into view or went out of it, and the rest all slipped by one.
+// and again -- and which of those is which goes by where they are: the closest pairs are made
+// first, within a third of the view. Going by their order instead went wrong as soon as one came
+// into view or went out of it, and the rest all slipped by one; and each taking the nearest in
+// turn let the text being typed into a box, as long as the name above it for a moment, take the
+// name's place before the name itself came to look.
 //
 // A draw whose vertices are written anew each frame -- into a buffer that is somewhere else each
 // time -- has no counterpart by that key; a second pass looks for one by the loose key, which is
@@ -2496,6 +2547,19 @@ static int link_order(const void *a, const void *b) {
     return *(const uint32_t *)a < *(const uint32_t *)b ? -1 : 1;
 }
 
+// A possible pair, and the order they are made in: closest first, then as the draws come.
+struct link_pair {
+    float dist;
+    uint32_t cur, prev;
+};
+static int pair_order(const void *a, const void *b) {
+    const struct link_pair *x = a, *y = b;
+    if (x->dist != y->dist) return x->dist < y->dist ? -1 : 1;
+    if (x->cur != y->cur) return x->cur < y->cur ? -1 : 1;
+    return x->prev < y->prev ? -1 : x->prev > y->prev;
+}
+#define LINK_CANDIDATES 8                                // per draw, the nearest kept
+
 static void rec_link(const struct frame_rec *prev, struct frame_rec *cur) {
     cur->linked_to = 0;
     for (uint32_t i = 0; i < cur->draw_count; i++) cur->draw[i].link = -1;
@@ -2503,45 +2567,70 @@ static void rec_link(const struct frame_rec *prev, struct frame_rec *cur) {
     static uint32_t *order, order_room;
     static uint8_t *taken;
     static uint32_t taken_room;
-    if (!GROW(order, order_room, prev->draw_count) || !GROW(taken, taken_room, prev->draw_count)) return;
+    static struct link_pair *pairs;
+    static uint32_t pairs_room;
+    if (!GROW(order, order_room, prev->draw_count) || !GROW(taken, taken_room, prev->draw_count)
+            || !GROW(pairs, pairs_room, cur->draw_count * LINK_CANDIDATES)) {
+        return;
+    }
     memset(taken, 0, prev->draw_count);
     link_from = prev;
     for (link_loose = 0; link_loose < 2; link_loose++) {
-    for (uint32_t i = 0; i < prev->draw_count; i++) order[i] = i;
-    qsort(order, prev->draw_count, sizeof *order, link_order);
-    for (uint32_t i = 0; i < cur->draw_count; i++) {
-        struct rec_draw *d = &cur->draw[i];
-        if (d->link >= 0) continue;
-        // The first of the earlier draws with this key.
-        uint64_t want = link_key(d);
-        uint32_t lo = 0, hi = prev->draw_count;
-        while (lo < hi) {
-            uint32_t mid = (lo + hi) / 2u;
-            if (link_key(&prev->draw[order[mid]]) < want) lo = mid + 1u;
-            else hi = mid;
-        }
-        int32_t best = -1;
-        float best_d = 0.0f;
-        for (uint32_t k = lo; k < prev->draw_count && link_key(&prev->draw[order[k]]) == want; k++) {
-            uint32_t j = order[k];
-            const struct rec_draw *p = &prev->draw[j];
-            if (taken[j] || p->vertices != d->vertices) continue;
-            float dist = 0.0f;
-            if (p->placed && d->placed) {
-                float dx = p->cx - d->cx, dy = p->cy - d->cy;
-                dist = dx * dx + dy * dy;
-                if (dist > 0.67f * 0.67f) continue;
+        for (uint32_t i = 0; i < prev->draw_count; i++) order[i] = i;
+        qsort(order, prev->draw_count, sizeof *order, link_order);
+        // Each draw's nearest few of the earlier ones with its key, then the pairs made closest
+        // first; one whose few were all taken looks again among the rest, nearest first.
+        uint32_t np = 0;
+        for (int round = 0; round < 2; round++) {
+            for (uint32_t i = 0; i < cur->draw_count; i++) {
+                struct rec_draw *d = &cur->draw[i];
+                if (d->link >= 0) continue;
+                uint64_t want = link_key(d);
+                uint32_t lo = 0, hi = prev->draw_count;
+                while (lo < hi) {
+                    uint32_t mid = (lo + hi) / 2u;
+                    if (link_key(&prev->draw[order[mid]]) < want) lo = mid + 1u;
+                    else hi = mid;
+                }
+                struct link_pair near[LINK_CANDIDATES];
+                uint32_t nn = 0;
+                for (uint32_t k = lo; k < prev->draw_count && link_key(&prev->draw[order[k]]) == want; k++) {
+                    uint32_t j = order[k];
+                    const struct rec_draw *p = &prev->draw[j];
+                    if (taken[j] || p->vertices != d->vertices) continue;
+                    float dist = 0.0f;
+                    if (p->placed && d->placed) {
+                        float dx = p->cx - d->cx, dy = p->cy - d->cy;
+                        dist = dx * dx + dy * dy;
+                        if (dist > 0.67f * 0.67f) continue;
+                    }
+                    // Kept in order, nearest first; on a tie the earlier draw, as before.
+                    uint32_t at = nn < LINK_CANDIDATES ? nn++ : LINK_CANDIDATES;
+                    if (at == LINK_CANDIDATES && !(dist < near[LINK_CANDIDATES - 1].dist)) continue;
+                    if (at == LINK_CANDIDATES) at = LINK_CANDIDATES - 1;
+                    while (at > 0 && dist < near[at - 1].dist) {
+                        near[at] = near[at - 1];
+                        at--;
+                    }
+                    near[at] = (struct link_pair){ dist, i, j };
+                }
+                if (round == 0) {
+                    for (uint32_t k = 0; k < nn; k++) pairs[np++] = near[k];
+                } else if (nn) {                          // the rest: in turn, as before
+                    taken[near[0].prev] = 1;
+                    d->link = (int32_t)near[0].prev;
+                }
             }
-            if (best < 0 || dist < best_d) {
-                best = (int32_t)j;
-                best_d = dist;
+            if (round == 1) break;
+            qsort(pairs, np, sizeof *pairs, pair_order);
+            for (uint32_t k = 0; k < np; k++) {
+                struct rec_draw *d = &cur->draw[pairs[k].cur];
+                if (d->link >= 0 || taken[pairs[k].prev]) continue;
+                taken[pairs[k].prev] = 1;
+                d->link = (int32_t)pairs[k].prev;
             }
+            np = 0;
         }
-        if (best >= 0) {
-            taken[best] = 1;
-            d->link = best;
-        }
-    }
     }
     cur->linked_to = prev->frame;
 }
@@ -2790,9 +2879,9 @@ static void replay_to(const struct frame_rec *prev, const struct frame_rec *cur,
             // Moved part of the way, and, for an upscaler, knowing where it was.
             if (!GROW(moved, moved_room, d->vertices)) continue;
             const struct vertex *from = moves ? prev->vert + p->first_vertex : v;
+            if (moves && t < 1.0f) lerp_draw(from, v, d->vertices, t, moved);
+            else memcpy(moved, v, d->vertices * sizeof *moved);
             for (uint32_t k = 0; k < d->vertices; k++) {
-                if (moves && t < 1.0f) lerp_vertex(&from[k], &v[k], t, &moved[k]);
-                else moved[k] = v[k];
                 memcpy(moved[k].prev, top ? from[k].pos : moved[k].pos, sizeof moved[k].prev);
                 if (top && !moves) {
                     // No counterpart: where the scene's move would have had it.
@@ -2864,9 +2953,9 @@ static void replay_check(uint32_t shared_addr, uint32_t thread_index, const stru
     }
 }
 
-// ALBW_REPLAY_HALF=<frame> writes, into ALBW_REPLAY_DIR, that frame's top screen and the one
-// before it as the replay draws them, and three frames between: a way to look at what the
-// matching makes of a scene without a window.
+// ALBW_REPLAY_HALF=<frame> (or <first>-<last>) writes, into ALBW_REPLAY_DIR, that frame's top
+// screen and the one before it as the replay draws them, and three frames between: a way to look
+// at what the matching makes of a scene without a window.
 static void write_ppm(const char *dir, unsigned long frame, const char *what, const uint8_t *rgb) {
     char path[600];
     snprintf(path, sizeof path, "%s/replay-%06lu-%s.ppm", dir, frame, what);
@@ -3058,15 +3147,18 @@ void albw_raster_frame_end(uint32_t shared_addr, uint32_t thread_index, unsigned
     int published = rec_latest, before = rec_prev;
     rec_next_frame();
 
-    static long half_at = -2;
+    static long half_at = -2, half_to = -1;
     if (half_at == -2) {
+        // <frame>, or <first>-<last> for every frame between.
         const char *h = albw_env("ALBW_REPLAY_HALF");
-        half_at = h ? strtol(h, NULL, 0) : -1;
+        char *end = NULL;
+        half_at = h ? strtol(h, &end, 0) : -1;
+        half_to = end && *end == '-' ? strtol(end + 1, NULL, 0) : half_at;
     }
     if (published < 0) return;                           // dropped by a change of setting
     rec_dump(frame, &recs[published]);
     pthread_mutex_lock(&replay_mutex);
-    if (half_at >= 0 && (long)frame == half_at && before >= 0) {
+    if (half_at >= 0 && (long)frame >= half_at && (long)frame <= half_to && before >= 0) {
         replay_half(&recs[before], &recs[published]);
     }
     // The records stay put while this runs: the game's thread is the one that would reuse them.
@@ -3417,7 +3509,7 @@ int albw_raster_gpu_frame(struct albw_gpu_frame *f, float t) {
             }
         }
         if (from && t < 1.0f && GROW(moved, moved_room, d->vertices)) {
-            for (uint32_t k = 0; k < d->vertices; k++) lerp_vertex(&from[k], &v[k], t, &moved[k]);
+            lerp_draw(from, v, d->vertices, t, moved);
             v = moved;
         }
         // And where each was in the frame shown before, for the upscaler: prev_t of the way from
@@ -3515,12 +3607,32 @@ int albw_raster_gpu_frame(struct albw_gpu_frame *f, float t) {
             gt->mip_linear = (uint8_t)tx->mip_linear;
             gt->wrap_s = (uint8_t)(tx->wrap_s & 3u);
             gt->wrap_t = (uint8_t)(tx->wrap_t & 3u);
+            gt->sample = tx->sample;
         }
         *o = (struct albw_gpu_event){ ALBW_GPU_DRAW, f->draw_count, 0, 0, 0, 0 };
         f->ev_count++;
         f->draw_count++;
     }
     return f->draw_count > 0 || f->ev_count > 0;
+}
+
+// A texture's bytes, sampled: the first and the last 64, and 32 runs of 8 spread between. Cheap
+// enough to take for every draw a record keeps, and what a texture loaded over another changes.
+uint64_t albw_texture_sample(uint32_t base, uint32_t span) {
+    if (!span || !albw_guest_ok(base, span)) return 0;
+    const uint8_t *p = albw_mem + base;
+    uint64_t h = 0x9E3779B97F4A7C15ull ^ span, v;
+    for (uint32_t i = 0; i < 64u && i < span; i++) h = (h ^ p[i]) * 0x100000001B3ull;
+    for (uint32_t i = span > 64u ? span - 64u : 0u; i < span; i++) h = (h ^ p[i]) * 0x100000001B3ull;
+    if (span >= 8u) {
+        for (uint32_t k = 0; k < 32u; k++) {
+            uint32_t at = (uint32_t)((uint64_t)(span - 8u) * k / 31u);
+            memcpy(&v, p + at, 8);
+            h = (h ^ v) * 0xFF51AFD7ED558CCDull;
+            h ^= h >> 32;
+        }
+    }
+    return h ? h : 1u;
 }
 
 uint32_t albw_raster_texture_bytes(uint32_t width, uint32_t height, uint32_t format) {

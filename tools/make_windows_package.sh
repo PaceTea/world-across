@@ -176,6 +176,9 @@ cp "$root/third_party/fsr1/license.txt" "$out/licences/FSR1-LICENSE.txt"
 mkdir -p "$out/fonts"
 cp "$root"/third_party/fonts/*.ttf "$out/fonts/"
 cp "$root/third_party/fonts/OFL.txt" "$out/licences/FiraSans-OFL.txt"
+# The launcher's picture, by teethegrinder, beside the program as well.
+mkdir -p "$out/art"
+cp "$root/third_party/art/launcher-background.jpg" "$out/art/"
 sdl_licence=
 for sdl in "$root"/external/SDL3-*/LICENSE.txt; do [ -f "$sdl" ] && sdl_licence=$sdl; done
 [ -n "$sdl_licence" ] || die "no SDL3 licence in external/SDL3-*/"
@@ -197,6 +200,10 @@ AMD FidelityFX Super Resolution 1 (in WorldAcross.exe) -- MIT, FSR1-LICENSE.txt
 
 Fira Sans Condensed 4.301 (fonts) -- SIL Open Font License 1.1, FiraSans-OFL.txt
     https://github.com/bBoxType/FiraSans
+
+The launcher's picture (art\launcher-background.jpg) -- by teethegrinder, made for World Across on
+commission; not under the MIT licence of the code
+    https://www.instagram.com/teethegrinder
 
 Python 3.14.10, the embeddable distribution (kit\python) -- PSF licence; libffi and the rest it
 includes are listed in Python-LICENSE.txt

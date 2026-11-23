@@ -36,6 +36,7 @@ struct albw_gpu_texture {
     uint32_t base, width, height, format;
     uint8_t enabled, levels;        // levels: the full-size one and its mipmaps
     uint8_t min_level, mag_linear, min_linear, mip_linear, wrap_s, wrap_t;
+    uint64_t sample;                // its bytes as the game drew with them (albw_texture_sample)
 };
 
 struct albw_gpu_draw {
@@ -88,6 +89,7 @@ void albw_raster_decode_texture(uint32_t base, uint32_t width, uint32_t height, 
                                 uint8_t *rgba);
 // The bytes a texture of that size takes, for one level.
 uint32_t albw_raster_texture_bytes(uint32_t width, uint32_t height, uint32_t format);
+uint64_t albw_texture_sample(uint32_t base, uint32_t span);
 
 // The game's side: with the GPU renderer showing the picture, the processor's triangles are not
 // set up or rasterised at all, and every frame is recorded.

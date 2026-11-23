@@ -1,5 +1,12 @@
 # World Across
 
+<p align="center">
+  <img src="third_party/art/launcher-background.jpg" width="100%"
+       alt="A green soldier in tall grass looks around, puzzled, while Link, flattened into a painting on the wall beside him, holds his breath">
+</p>
+<p align="center"><em>Launcher art by <a href="https://www.instagram.com/teethegrinder"><b>teethegrinder</b></a>, made for World Across.
+Go and see the rest of their work on <a href="https://www.instagram.com/teethegrinder">Instagram</a>.</em></p>
+
 A native Linux and Windows build of *The Legend of Zelda: A Link Between Worlds* (Nintendo 3DS),
 made by translating the game's ARM11 code into C ahead of time rather than interpreting it at
 runtime. Inside the tree the project still goes by its working name, albw-port: the developer's
@@ -33,28 +40,20 @@ ADPCM music streams, PCM sound effects -- decoded, resampled, filtered and mixed
 second.
 
 What is missing: cube maps and the other GPU features this game has not been seen to use, the
-DSP's reverb and compressor, frame generation, and the certainty that the rest of the game runs.
+DSP's reverb and compressor, and the certainty that the rest of the game runs.
 So this is a port whose first scenes can be played, plus the tooling to keep extending it as the
 game goes on -- not yet one anybody has played through.
 
 ## Download
 
-The [releases](https://github.com/PaceTea/world-across/releases) have the launcher for Linux and
-for Windows. It holds no part of the game: the first time it starts, you choose your card -- a
-decrypted dump of a cartridge you own -- and it makes the game from it on your machine, reading
-the card, translating the game's code to C and compiling it. That takes a few minutes, once; the
-tools it needs (the translator, Python and a C compiler) come with it.
+Get the launcher from the [latest release](https://github.com/PaceTea/world-across/releases/latest):
 
-- **Linux**: `World-Across-x86_64.AppImage`. Make it executable (`chmod +x`) and start it. It
-  runs on any distribution with glibc 2.34 or later -- Ubuntu 22.04, Debian 12, Fedora 35 and
-  newer -- and needs nothing installed besides a graphics driver.
-- **Windows**: `World-Across-Windows.zip`. Unpack it entirely and start `WorldAcross.exe` from the
-  unpacked folder. Windows 10 or later, 64-bit.
+- **Windows 10 or 11:** unpack `World-Across-Windows.zip` and start `WorldAcross.exe`.
+- **Linux:** make `World-Across-x86_64.AppImage` executable and start it.
 
-The graphics card draws the game through Vulkan, which every current AMD, NVIDIA and Intel driver
-provides; without it the processor draws instead. What the launcher makes from your card stays
-on your machine -- `~/.cache/albw-port/build` on Linux, `%LOCALAPPDATA%\albw-port\build` on
-Windows -- and is yours alone.
+The first time, choose your card -- a decrypted dump of a cartridge you own. The launcher makes the
+game from it on your machine, once, in a few minutes, and keeps the card in a `card` folder beside
+the program. All it needs is a graphics driver with Vulkan; what it makes stays on your machine.
 
 ## What you need to supply
 
@@ -191,11 +190,21 @@ enough, from any directory. Started with no card known, the launcher's first ite
 which asks for it in the desktop's file dialog. `ALBW_ROM=/path/to/your.3ds` names it too, which is
 how the tools do it.
 
+A card named on the command line, chosen in the launcher or remembered from before is moved into
+the program's card folder (`src/runtime/albw_card.c`): `card/` in the source tree for a build made
+in it (git ignores it; `build/` is made again now and then, the tree is not), else `card` beside
+the program or the AppImage file, else the fallback above. Within one file system that is a
+rename; across two the card is copied, the launcher showing how far, and the original removed once
+the copy is whole. With no card remembered, or the remembered one gone, the first card image in the
+folder is played. The card in `ALBW_ROM` stays where it is, and `ALBW_CARD_STAYS=1` leaves any card
+where it is.
+
 It will run until it hits something unimplemented and say what that was. Useful knobs:
 
 | Variable | Effect |
 | --- | --- |
-| `ALBW_ROM` | the card image, for RomFS reads |
+| `ALBW_ROM` | the card image, for RomFS reads; left where it is, unlike a card named or chosen |
+| `ALBW_CARD_STAYS=1` | no card is moved into the card folder |
 | `ALBW_SAVE_DIR` | where saves go; see below |
 | `ALBW_DISCOVER=<file>` | record the first indirect branch target that has no translated function, then stop |
 | `ALBW_NEIGHBOURS` | report where else a missing branch target appears in guest memory |
@@ -221,7 +230,7 @@ It will run until it hits something unimplemented and say what that was. Useful 
 | `ALBW_SCREENSHOT=<frame>:<file.bmp>` | the whole window as it looked at that frame (works offscreen with `SDL_VIDEO_DRIVER=offscreen`) |
 | `ALBW_DUMP_MEM=<frame>,...` | write the guest's data, heap and linear memory at those frames, into `ALBW_DUMP_MEM_DIR` |
 | `ALBW_REPLAY_CHECK=1` | record every frame as the frames in between are drawn from, play it back unmoved into the shadow, and compare it with the game's own picture (it must come out byte for byte the same; works headless) |
-| `ALBW_REPLAY_HALF=<frame>` | write that frame's top screen, the one before it, and three frames between them as PPMs into `ALBW_REPLAY_DIR` |
+| `ALBW_REPLAY_HALF=<frame>` or `<first>-<last>` | write that frame's top screen, the one before it, and three frames between them as PPMs into `ALBW_REPLAY_DIR` (for each frame of the range) |
 | `ALBW_REPLAY_VERBOSE=1` | what each recorded frame holds, and what a frame in between costs |
 | `ALBW_FSR3_TEST=<frame>:<count>[:<scale>]` | run FSR 3 headless over those frames and write what goes in (the jittered picture, depth, motion) and what comes out into `ALBW_REPLAY_DIR` |
 | `ALBW_GPU_FSR3_TEST=<first>-<last>:<render scale>:<shown scale>:<dir>` | the same through the GPU renderer: those frames drawn on the card at the render scale with the jitter and the upscaler's targets, upscaled by FSR 3 to the shown scale, and the last one written as `fsr3-<frame>.ppm` (with its input and motion) beside `gpu-<frame>-native.ppm`, the frame drawn straight at the shown scale |
@@ -238,10 +247,13 @@ With SDL3 installed the port opens a window; without it, or with `ALBW_HEADLESS=
 exactly as before.
 
 The window opens on a launcher: Play, Settings and Quit. The game itself starts only on Play --
-nothing runs or sounds before. Behind the menu goes a picture of your own if you put one at
-`~/.config/albw-port/background.png` (or `.jpg`); none comes with the port. Without one, the menu
-shows the scene the game was left in last time -- kept when the window closes after at least two
-minutes of play, from your own game, in the cache folder as `backdrop.jpg`. The menu is set in Fira
+nothing runs or sounds before. Behind the menu goes the launcher's picture, made for World Across
+by [teethegrinder](https://www.instagram.com/teethegrinder) (`third_party/art/`, which the packages
+bring along); the button in the bottom right corner names the artist, and pressed again opens the
+artist's page -- with the mouse, or Right and then A. A picture of your own at
+`~/.config/albw-port/background.png` (or `.jpg`) takes its place. Without either, the menu shows
+the scene the game was left in last time -- kept when the window closes after at least two minutes
+of play, from your own game, in the cache folder as `backdrop.jpg`. The menu is set in Fira
 Sans Condensed (SIL Open Font License, in `third_party/fonts/`), which the packages bring along. Settings
 (fullscreen, how the screens are arranged, the renderer, its resolution and anti-aliasing,
 upscaling and its sharpening, the frame rate, whole-pixel scaling, sound, gamepads, the touch screen
@@ -502,8 +514,8 @@ src/ffx/         what AMD's FidelityFX SDK needs to build on Linux
 entries/         guest addresses the running game branched to, per release (see above)
 tools/           extraction, recompiler, oracle, discovery loop, regression checks, Ghidra scripts,
                  the packaging scripts (tools/appimage: what the AppImage needs)
-third_party/     AMD FSR 1 and Fira Sans Condensed, unchanged; the licences of what the packages
-                 bundle (kit/)
+third_party/     AMD FSR 1 and Fira Sans Condensed, unchanged; the launcher's picture (art/); the
+                 licences of what the packages bundle (kit/)
 cmake/           build helpers
 ```
 
@@ -552,7 +564,8 @@ and `src/runtime/albw_upscale.c` follows its EASU and RCAS step by step in C.
 The port's own code is under the MIT licence; see `LICENSE`. Third-party code keeps its own: AMD
 FSR 1 in `third_party/fsr1/` is under the MIT licence as well (`third_party/fsr1/license.txt`), and
 the FidelityFX and DLSS SDKs are not part of the repository and come with their own terms (see
-above). The packages carry the licences of everything they bundle, and say where its sources are;
+above). The launcher's picture in `third_party/art/` is teethegrinder's, made for World Across on
+commission, and not under the MIT licence. The packages carry the licences of everything they bundle, and say where its sources are;
 DLSS is not in them. The licence covers this repository and nothing else: the game, its code and its assets are
 Nintendo's, and nothing derived from a cartridge -- extracted files, translated code, a build of
 the port -- may be redistributed.
