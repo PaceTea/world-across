@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- What SignPath signs in the package .github/workflows/windows.yml builds: WorldAcross.exe alone,
+     and only with the product name and the version it carries (src/runtime/world_across.rc.in).
+     The workflow passes the version CMakeLists.txt sets. Python, GCC and SDL3.dll in the package
+     are other projects' builds and stay as they published them. To be pasted into the project's
+     artifact configuration on SignPath. -->
+<artifact-configuration xmlns="http://signpath.io/artifact-configuration/v1">
+  <parameters>
+    <parameter name="version" required="true" />
+  </parameters>
+  <zip-file>
+    <pe-file path="WorldAcross.exe" product-name="World Across" product-version="${version}">
+      <authenticode-sign />
+    </pe-file>
+  </zip-file>
+</artifact-configuration>

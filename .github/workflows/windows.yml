@@ -1,0 +1,117 @@
+# The Windows package, built here from this repository, so that what is published can be traced to
+# its source -- which SignPath Foundation's free code signing for open-source projects requires. Run
+# by hand (Actions, "Windows package", Run workflow) it builds the package and keeps it as an
+# artifact; when a release is published it also checks the release's tag against the version, has
+# WorldAcross.exe signed, once signing is set up, and puts the zip on that release.
+#
+# Signing goes through SignPath (https://signpath.org). It is set up by the repository variables
+# SIGNPATH_ORGANIZATION_ID, SIGNPATH_PROJECT_SLUG and SIGNPATH_POLICY_SLUG and the secret
+# SIGNPATH_API_TOKEN; without them the package is built and published unsigned, as before. Only
+# WorldAcross.exe is signed: Python, the compiler and SDL3.dll are other projects' builds, as they
+# published them. What SignPath signs is described in .signpath/artifact-configuration.xml.
+name: Windows package
+
+on:
+  workflow_dispatch:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    # Arch Linux, as the package is made on the developer's machine: MinGW-w64 GCC, glslc, stb.
+    container: archlinux:base-devel
+    outputs:
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Tools
+        run: |
+          pacman -Syu --noconfirm --needed git cmake ninja mingw-w64-gcc shaderc stb 7zip python python-pip curl
+      - uses: actions/checkout@v4
+      - name: Version
+        id: version
+        run: |
+          version=$(sed -n 's/^set(ALBW_VERSION \([0-9.]*\))$/\1/p' CMakeLists.txt)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          tag="${{ github.event.release.tag_name }}"
+          if [ -n "$tag" ] && [ "$tag" != "v$version" ]; then
+            echo "the release's tag $tag is not v$version, the version CMakeLists.txt sets" >&2
+            exit 1
+          fi
+      - name: Downloads, checked against their SHA-256
+        run: |
+          mkdir -p external/kit
+          curl -fsSL -o external/kit/python-3.14.10-embed-amd64.zip \
+            https://www.python.org/ftp/python/3.14.10/python-3.14.10-embed-amd64.zip
+          curl -fsSL -o external/kit/w64devkit-x64-2.11.0.7z.exe \
+            https://github.com/skeeto/w64devkit/releases/download/v2.11.0/w64devkit-x64-2.11.0.7z.exe
+          python -m pip download --no-deps --only-binary=:all: --platform win_amd64 --python-version 3.14 \
+            --dest external/kit capstone==5.0.9
+          curl -fsSL -o external/SDL3-devel-3.4.20-mingw.tar.gz \
+            https://github.com/libsdl-org/SDL/releases/download/release-3.4.20/SDL3-devel-3.4.20-mingw.tar.gz
+          sha256sum -c <<'SUMS'
+          90905e64a840557d8c1bc4f5b74db3d7ee85e3ffb217611cac1c7813acea4159  external/kit/python-3.14.10-embed-amd64.zip
+          732cedbbb56d42e723f14d7af6387f1454194a820b4b96b56d1e53f865ef85d0  external/kit/capstone-5.0.9-py3-none-win_amd64.whl
+          54c2bb9962e8a30c8270e34c5efc3d5fee579f53087fa7d435b95fbba2af7b2b  external/kit/w64devkit-x64-2.11.0.7z.exe
+          d2d3bf3fb97a90b22e908a306d7362631ef1bab229d988fe6669595dc29cd9ed  external/SDL3-devel-3.4.20-mingw.tar.gz
+          SUMS
+          tar -xzf external/SDL3-devel-3.4.20-mingw.tar.gz -C external
+      - name: Build the launcher
+        run: |
+          cmake -B build-win -G Ninja -DCMAKE_TOOLCHAIN_FILE=cmake/mingw-w64-x86_64.cmake
+          ninja -C build-win world-across
+      - name: Package
+        run: tools/make_windows_package.sh
+      - name: Keep the package
+        id: upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: World-Across-Windows
+          path: build-win/World-Across-Windows/
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: The package as built
+        if: ${{ vars.SIGNPATH_ORGANIZATION_ID == '' }}
+        uses: actions/download-artifact@v4
+        with:
+          name: World-Across-Windows
+          path: World-Across-Windows
+      - name: WorldAcross.exe signed (approved by hand on SignPath)
+        if: ${{ vars.SIGNPATH_ORGANIZATION_ID != '' }}
+        uses: signpath/github-action-submit-signing-request@v2
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG }}
+          signing-policy-slug: ${{ vars.SIGNPATH_POLICY_SLUG }}
+          github-artifact-id: ${{ needs.build.outputs.artifact-id }}
+          wait-for-completion: true
+          wait-for-completion-timeout-in-seconds: 86400
+          output-artifact-directory: World-Across-Windows
+          parameters: |
+            version: "${{ needs.build.outputs.version }}"
+      - name: Zip
+        run: |
+          7z a -tzip -mx=9 World-Across-Windows.zip World-Across-Windows > /dev/null
+          sha256sum World-Across-Windows.zip
+      - name: Keep the zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: World-Across-Windows-zip
+          path: World-Across-Windows.zip
+      - name: Onto the release
+        if: ${{ github.event_name == 'release' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "${{ github.event.release.tag_name }}" World-Across-Windows.zip --clobber \
+            --repo "${GITHUB_REPOSITORY}"

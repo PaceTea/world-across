@@ -1284,7 +1284,10 @@ void albw_launcher_draw(SDL_Texture *top) {
                      : (started ? "Esc resumes \xc2\xb7 F1 settings" : "");
     float hint_y = yb - H * (artist_shown ? 0.062f : 0.032f);
     if (*hint) text(&f_small, W - x0 - text_width(&f_small, hint), hint_y, hint, grey, 0.6f * fade);
-    const char *version = "World Across 0.1";
+#ifndef ALBW_VERSION
+#define ALBW_VERSION "0.1"
+#endif
+    const char *version = "World Across " ALBW_VERSION;
     float version_right = W - x0;
     if (artist_shown) {
         // The artist's button, in the corner: ARTIST, then the name, which opens the artist's page.

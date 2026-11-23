@@ -246,9 +246,13 @@ draws the game through Vulkan, which every current AMD, NVIDIA and Intel driver 
 it the processor draws instead.
 
 Where things are kept:
+  card\                             your card, moved here when you choose it
   %LOCALAPPDATA%\albw-port\build    the game as the launcher made it, and build.log
   %APPDATA%\albw-port               settings and saves; last-run.log, the log of the last run
 What the launcher makes from your card is yours alone: do not share it.
+
+To remove World Across, delete this folder and the two folders named above (%LOCALAPPDATA%\albw-port
+and %APPDATA%\albw-port). Nothing else is installed.
 
 kit\ holds what the build uses: the translating tools, Python with capstone and the GCC compiler.
 licences\ has their licences and says where their sources are.

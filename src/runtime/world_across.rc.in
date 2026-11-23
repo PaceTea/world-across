@@ -1,0 +1,32 @@
+// What Windows shows of WorldAcross.exe (Properties, Details) and what a code signature names: the
+// product and its version, filled in by CMake from ALBW_VERSION.
+#include <winver.h>
+
+VS_VERSION_INFO VERSIONINFO
+FILEVERSION @ALBW_VERSION_MAJOR@,@ALBW_VERSION_MINOR@,@ALBW_VERSION_PATCH@,0
+PRODUCTVERSION @ALBW_VERSION_MAJOR@,@ALBW_VERSION_MINOR@,@ALBW_VERSION_PATCH@,0
+FILEFLAGSMASK VS_FFI_FILEFLAGSMASK
+FILEFLAGS 0
+FILEOS VOS_NT_WINDOWS32
+FILETYPE VFT_APP
+FILESUBTYPE VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "CompanyName", "PaceTea"
+            VALUE "FileDescription", "World Across"
+            VALUE "FileVersion", "@ALBW_VERSION@"
+            VALUE "InternalName", "world-across"
+            VALUE "LegalCopyright", "Copyright (c) 2026 PaceTea, MIT licence"
+            VALUE "OriginalFilename", "WorldAcross.exe"
+            VALUE "ProductName", "World Across"
+            VALUE "ProductVersion", "@ALBW_VERSION@"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END

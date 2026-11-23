@@ -1,6 +1,15 @@
 cmake_minimum_required(VERSION 3.20)
 project(albw-port C)
 
+# The published version, here alone: the launcher shows it, WorldAcross.exe carries it in its version
+# resource, and the release workflow checks the tag against it.
+set(ALBW_VERSION 0.1.5)
+string(REPLACE "." ";" ALBW_VERSION_PARTS "${ALBW_VERSION}")
+list(GET ALBW_VERSION_PARTS 0 ALBW_VERSION_MAJOR)
+list(GET ALBW_VERSION_PARTS 1 ALBW_VERSION_MINOR)
+list(GET ALBW_VERSION_PARTS 2 ALBW_VERSION_PATCH)
+add_compile_definitions(ALBW_VERSION="${ALBW_VERSION}")
+
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 
@@ -51,6 +60,10 @@ target_link_libraries(world-across PRIVATE ${CMAKE_DL_LIBS})
 # (tools/make_appimage.sh).
 set(ALBW_LAUNCHER_EXTRA_SOURCES "" CACHE STRING "Further sources linked into world-across")
 target_sources(world-across PRIVATE ${ALBW_LAUNCHER_EXTRA_SOURCES})
+if(WIN32)
+    configure_file(src/runtime/world_across.rc.in ${CMAKE_BINARY_DIR}/world_across.rc @ONLY)
+    target_sources(world-across PRIVATE ${CMAKE_BINARY_DIR}/world_across.rc)
+endif()
 if(WIN32)
     set_target_properties(world-across PROPERTIES OUTPUT_NAME WorldAcross)
 endif()

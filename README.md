@@ -55,6 +55,29 @@ The first time, choose your card -- a decrypted dump of a cartridge you own. The
 game from it on your machine, once, in a few minutes, and keeps the card in a `card` folder beside
 the program. All it needs is a graphics driver with Vulkan; what it makes stays on your machine.
 
+To remove it, delete the program (and its `card` folder, if you no longer want the card there),
+and the folders it keeps things in: on Windows `%APPDATA%\albw-port` (settings, saves) and
+`%LOCALAPPDATA%\albw-port` (the game it made); on Linux `~/.config/albw-port`,
+`~/.local/share/albw-port` and `~/.cache/albw-port`.
+
+### Code signing policy
+
+Free code signing provided by [SignPath.io](https://about.signpath.io), certificate by
+[SignPath Foundation](https://signpath.org) -- applied for; until the project is accepted, the
+Windows package is unsigned and Windows warns about an unknown publisher (More info, then Run
+anyway).
+
+- Committers and reviewers: [PaceTea](https://github.com/PaceTea)
+- Approvers: [PaceTea](https://github.com/PaceTea)
+
+What is signed is `WorldAcross.exe`, built by GitHub Actions from this repository
+([`.github/workflows/windows.yml`](.github/workflows/windows.yml)); each signing is approved by
+hand. The package's Python, compiler and `SDL3.dll` are those projects' own builds, unchanged.
+
+Privacy: this program will not transfer any information to other networked systems unless
+specifically requested by the user or the person installing or operating it. (The launcher's
+artist button opens the artist's page in your browser when you press it; nothing else goes out.)
+
 ## What you need to supply
 
 Nothing in this repository is derived from the game. No code, no assets, no addresses read out
