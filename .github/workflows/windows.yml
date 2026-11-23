@@ -2,11 +2,11 @@
 # its source -- which SignPath Foundation's free code signing for open-source projects requires. Run
 # by hand (Actions, "Windows package", Run workflow) it builds the package and keeps it as an
 # artifact; when a release is published it also checks the release's tag against the version, has
-# WorldAcross.exe signed, once signing is set up, and puts the zip on that release.
+# WorldAcross.exe signed, once signing is set up, and puts the signed zip on that release.
 #
 # Signing goes through SignPath (https://signpath.org). It is set up by the repository variables
 # SIGNPATH_ORGANIZATION_ID, SIGNPATH_PROJECT_SLUG and SIGNPATH_POLICY_SLUG and the secret
-# SIGNPATH_API_TOKEN; without them the package is built and published unsigned, as before. Only
+# SIGNPATH_API_TOKEN; without them the package is built and kept as an artifact only. Only
 # WorldAcross.exe is signed: Python, the compiler and SDL3.dll are other projects' builds, as they
 # published them. What SignPath signs is described in .signpath/artifact-configuration.xml.
 name: Windows package
@@ -108,8 +108,9 @@ jobs:
         with:
           name: World-Across-Windows-zip
           path: World-Across-Windows.zip
+      # Onto the release only signed: unsigned, the zip made and checked by hand stays.
       - name: Onto the release
-        if: ${{ github.event_name == 'release' }}
+        if: ${{ github.event_name == 'release' && vars.SIGNPATH_ORGANIZATION_ID != '' }}
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
